@@ -227,6 +227,7 @@ fn max_depth_exceeded_on_an_over_budget_item_is_a_clean_error() {
         &DiffOptions {
             max_depth: 3,
             ignore_order: true,
+            ..DiffOptions::default()
         },
     )
     .unwrap_err();
@@ -245,6 +246,7 @@ fn max_depth_boundary_is_exact_for_an_item_on_the_a_side() {
         &DiffOptions {
             max_depth: 2,
             ignore_order: true,
+            ..DiffOptions::default()
         },
     )
     .unwrap_err();
@@ -260,6 +262,7 @@ fn max_depth_boundary_is_exact_for_an_item_on_the_b_side() {
         &DiffOptions {
             max_depth: 2,
             ignore_order: true,
+            ..DiffOptions::default()
         },
     )
     .unwrap_err();
@@ -297,6 +300,7 @@ fn paired_recursion_depth_boundary_is_exact() {
         &DiffOptions {
             max_depth: 2,
             ignore_order: true,
+            ..DiffOptions::default()
         },
     )
     .unwrap_err();
@@ -889,6 +893,7 @@ fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
             &DiffOptions {
                 max_depth,
                 ignore_order: false,
+                ..DiffOptions::default()
             },
             &IgnoreOrderMemo::new(),
         )
@@ -990,6 +995,7 @@ fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact()
         let opts = DiffOptions {
             max_depth,
             ignore_order: false,
+            ..DiffOptions::default()
         };
         super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new())
     };
@@ -1013,6 +1019,7 @@ fn count_object_diff_leaves_walks_a_one_sided_non_str_key_pair_with_the_mixed_pa
     let opts = DiffOptions {
         max_depth: 3,
         ignore_order: false,
+        ..DiffOptions::default()
     };
     assert_eq!(
         super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new()),
@@ -1250,6 +1257,7 @@ fn rough_distance_depth_boundary_is_exact() {
             &DiffOptions {
                 max_depth,
                 ignore_order: false,
+                ..DiffOptions::default()
             },
             &IgnoreOrderMemo::new(),
         )
@@ -1276,6 +1284,7 @@ fn ignore_order_opts(max_depth: usize) -> DiffOptions {
     DiffOptions {
         ignore_order: true,
         max_depth,
+        ..DiffOptions::default()
     }
 }
 
@@ -1710,6 +1719,7 @@ proptest! {
         let opts = DiffOptions {
             ignore_order: true,
             max_depth: 1_000,
+            ..DiffOptions::default()
         };
         let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &super::IgnoreOrderMemo::new());
         let without =
@@ -1728,6 +1738,7 @@ fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
     let opts = DiffOptions {
         ignore_order: true,
         max_depth: 100_000,
+        ..DiffOptions::default()
     };
     let build = |depth: usize, leaf: i64| {
         let mut value = json!(leaf);
@@ -2999,6 +3010,7 @@ fn memo_does_not_conflate_lists_sharing_itemkey_but_differing_repetition() {
     let opts = DiffOptions {
         ignore_order: true,
         max_depth: 1_000,
+        ..DiffOptions::default()
     };
 
     // Both key orders: the memo processes candidates in order, so a short-then-
@@ -3100,6 +3112,7 @@ proptest! {
         let opts = DiffOptions {
             ignore_order: true,
             max_depth: 1_000,
+            ..DiffOptions::default()
         };
         let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::new());
         let without =
@@ -3121,6 +3134,7 @@ fn distance_memo_only_caches_container_pairs_when_enabled() {
     let opts = DiffOptions {
         ignore_order: true,
         max_depth: 1_000,
+        ..DiffOptions::default()
     };
 
     // Scalars never recurse, so an enabled memo caches nothing for them.
@@ -3211,6 +3225,7 @@ fn ignore_order_memo_at_default_budget_on_plain_thread() {
             let opts = DiffOptions {
                 ignore_order: true,
                 max_depth: crate::diff::DEFAULT_MAX_DEPTH,
+                ..DiffOptions::default()
             };
             let report = crate::diff::diff_with_options(&build(1), &build(2), &opts)
                 .expect("default-budget ignore_order diff succeeds");

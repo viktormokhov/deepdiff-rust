@@ -4,6 +4,9 @@
 //! around `super::dispatch`'s recursive [`super::diff_at`], differing in how
 //! much of [`DiffOptions`] the caller controls and whether tokens resolve.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use crate::value::Value;
 
 use crate::error::Error;
@@ -16,7 +19,11 @@ use super::{diff_at, values_equal};
 pub const DEFAULT_MAX_DEPTH: usize = 512;
 /// The options a [`diff_with_options`] call runs with; `Default` matches
 /// [`diff()`]: [`DEFAULT_MAX_DEPTH`], ordered comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per DeepDiff keyword"
+)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiffOptions {
     /// The recursion-depth bound, independent of `ignore_order`; see
     /// `docs/design/depth-budget.md`.
@@ -25,6 +32,21 @@ pub struct DiffOptions {
     /// depth pair by hash instead of by index; dicts are unaffected. See
     /// `docs/design/ignore-order.md`.
     pub ignore_order: bool,
+    /// `significant_digits`: numbers compare by their rounded string.
+    pub significant_digits: Option<usize>,
+    /// `number_format_notation='e'` for [`Self::significant_digits`].
+    pub exponent_notation: bool,
+    /// `math_epsilon`: numbers compare by `math.isclose(abs_tol=...)`.
+    pub math_epsilon: Option<f64>,
+    /// `use_log_scale`'s `log_scale_similarity_threshold`, when on.
+    pub log_scale_threshold: Option<f64>,
+    pub ignore_nan_inequality: bool,
+    pub ignore_string_case: bool,
+    /// `ignore_numeric_type_changes`: numbers hash without their type.
+    pub ignore_numeric_type_changes: bool,
+    /// `ignore_type_in_groups`: each class name's bitmask of the groups it
+    /// is in; values sharing a bit never report `type_changes`.
+    pub type_groups: Option<Arc<HashMap<Box<str>, u64>>>,
 }
 
 impl Default for DiffOptions {
@@ -32,9 +54,40 @@ impl Default for DiffOptions {
         Self {
             max_depth: DEFAULT_MAX_DEPTH,
             ignore_order: false,
+            significant_digits: None,
+            exponent_notation: false,
+            math_epsilon: None,
+            log_scale_threshold: None,
+            ignore_nan_inequality: false,
+            ignore_string_case: false,
+            ignore_numeric_type_changes: false,
+            type_groups: None,
         }
     }
 }
+impl DiffOptions {
+    /// Whether `a` and `b` share an `ignore_type_in_groups` group.
+    pub(crate) fn same_group(&self, a: &Value, b: &Value) -> bool {
+        self.type_groups.as_ref().is_some_and(|groups| {
+            let mask = |v: &Value| {
+                let name = super::effective_type_name(v);
+                groups.get(name.as_str()).copied().unwrap_or(0)
+            };
+            mask(a) & mask(b) != 0
+        })
+    }
+
+    /// Whether a pair the plain rules call unequal may still compare equal.
+    pub(crate) fn normalizes(&self) -> bool {
+        self.significant_digits.is_some()
+            || self.math_epsilon.is_some()
+            || self.log_scale_threshold.is_some()
+            || self.ignore_nan_inequality
+            || self.ignore_string_case
+            || self.type_groups.is_some()
+    }
+}
+
 /// Diffs two JSON-shaped values into a [`Report`], bounding recursion at
 /// [`DEFAULT_MAX_DEPTH`].
 ///
@@ -84,7 +137,12 @@ pub fn diff(a: &Value, b: &Value) -> Result<Report, Error> {
 /// ```
 pub fn diff_with_options(a: &Value, b: &Value, opts: &DiffOptions) -> Result<Report, Error> {
     // A fresh memo per call: no state survives across diffs.
-    diff_with_options_memo(a, b, opts, &crate::ignore_order::IgnoreOrderMemo::new())
+    diff_with_options_memo(
+        a,
+        b,
+        opts,
+        &crate::ignore_order::IgnoreOrderMemo::new().normalized(opts),
+    )
 }
 
 /// A value compared in place of a token: shared, or borrowed from a value
@@ -130,7 +188,7 @@ pub fn diff_with_resolver<'r>(
         a,
         b,
         opts,
-        &crate::ignore_order::IgnoreOrderMemo::with_resolver(resolver),
+        &crate::ignore_order::IgnoreOrderMemo::with_resolver(resolver).normalized(opts),
     )
 }
 
@@ -184,6 +242,7 @@ pub fn diff_with_max_depth(a: &Value, b: &Value, max_depth: usize) -> Result<Rep
         &DiffOptions {
             max_depth,
             ignore_order: false,
+            ..DiffOptions::default()
         },
     )
 }

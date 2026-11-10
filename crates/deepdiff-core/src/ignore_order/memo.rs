@@ -42,6 +42,8 @@ pub(crate) struct IgnoreOrderMemo<'r> {
     resolver: RefCell<Option<&'r mut Resolver<'r>>>,
     resolutions: RefCell<BTreeMap<Box<str>, Option<Resolution<'r>>>>,
     enabled: bool,
+    /// The leaf normalization item keys apply.
+    pub(crate) norm: crate::normalize::HashNorm,
     /// Count of [`Self::put`] calls, not just distinct entries: the
     /// signal that rises if a caller recomputes a distance instead of
     /// reusing the cache. Test-only.
@@ -61,6 +63,7 @@ impl<'r> IgnoreOrderMemo<'r> {
             resolver: RefCell::new(None),
             resolutions: RefCell::new(BTreeMap::new()),
             enabled: true,
+            norm: crate::normalize::HashNorm::default(),
             #[cfg(test)]
             puts: std::cell::Cell::new(0),
         }
@@ -79,6 +82,7 @@ impl<'r> IgnoreOrderMemo<'r> {
             resolver: RefCell::new(None),
             resolutions: RefCell::new(BTreeMap::new()),
             enabled: false,
+            norm: crate::normalize::HashNorm::default(),
             puts: std::cell::Cell::new(0),
         }
     }
@@ -95,6 +99,12 @@ impl<'r> IgnoreOrderMemo<'r> {
     /// Whether the pair `(a, b)` reports nothing without a walk: the identical
     /// Python object on both sides, or a cycle token on the first, as
     /// `DeepDiff`'s `t1 is t2` and `parents_ids` checks skip them.
+    /// This memo keying leaves as `opts` normalizes them.
+    pub(crate) fn normalized(mut self, opts: &crate::diff::DiffOptions) -> Self {
+        self.norm = crate::normalize::HashNorm::of(opts);
+        self
+    }
+
     pub(crate) fn skips(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Object(x), Value::Object(y)) if x.same_instance(y) => true,

@@ -37,28 +37,29 @@ pub(crate) fn diff_at(
         (Value::Bool(old), Value::Bool(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
-        (Value::Number(old), Value::Number(new)) => {
-            numeric_diff(path, old, new, a, b, depth, opts.max_depth)
+        (Value::Number(old), Value::Number(new)) => numeric_diff(path, old, new, a, b, depth, opts),
+        (Value::Str(_), Value::Str(_)) if opts.ignore_string_case => {
+            case_folded_diff(path, a, b, depth, opts.max_depth)
         }
         (Value::Str(old), Value::Str(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)
         }
         (Value::DateTime(old), Value::DateTime(new)) => {
-            if same_class(a, b) {
+            if same_class(a, b) || opts.same_group(a, b) {
                 datetime_diff(path, old.value(), new.value(), depth, opts.max_depth)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
             }
         }
         (Value::Date(old), Value::Date(new)) => {
-            if same_class(a, b) {
+            if same_class(a, b) || opts.same_group(a, b) {
                 scalar_diff(path, old == new, a, b, depth, opts.max_depth)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
             }
         }
         (Value::Time(old), Value::Time(new)) => {
-            if same_class(a, b) {
+            if same_class(a, b) || opts.same_group(a, b) {
                 // Plain `_diff_time` equality — no normalization step,
                 // unlike `datetime_diff` (see `docs/design/value-model.md`).
                 scalar_diff(
@@ -74,21 +75,21 @@ pub(crate) fn diff_at(
             }
         }
         (Value::TimeDelta(old), Value::TimeDelta(new)) => {
-            if same_class(a, b) {
+            if same_class(a, b) || opts.same_group(a, b) {
                 scalar_diff(path, old == new, a, b, depth, opts.max_depth)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
             }
         }
         (Value::Array(old), Value::Array(new)) | (Value::Tuple(old), Value::Tuple(new)) => {
-            if same_class(a, b) {
+            if same_class(a, b) || opts.same_group(a, b) {
                 array_diff(path, old, new, depth, opts, memo)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
             }
         }
         (Value::Set(old), Value::Set(new)) | (Value::FrozenSet(old), Value::FrozenSet(new)) => {
-            if same_class(a, b) {
+            if same_class(a, b) || opts.same_group(a, b) {
                 set_diff(path, old, new, depth, opts, memo)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
@@ -97,7 +98,7 @@ pub(crate) fn diff_at(
         (Value::Object(old), Value::Object(new))
             if old.kind() == ObjectKind::Dict && new.kind() == ObjectKind::Dict =>
         {
-            if same_class(a, b) {
+            if same_class(a, b) || opts.same_group(a, b) {
                 object_diff(path, old, new, depth, opts, memo)
             } else {
                 type_change_report(path, a, b, depth, opts.max_depth)
@@ -106,6 +107,7 @@ pub(crate) fn diff_at(
         (Value::Object(_), _) | (_, Value::Object(_)) => {
             object_pair_diff(path, a, b, depth, opts, memo)
         }
+        _ if opts.same_group(a, b) => grouped_diff(path, a, b, depth, opts, memo),
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
 }
@@ -253,4 +255,57 @@ pub(crate) fn scoped<T>(
     let result = f(path);
     path.pop();
     result
+}
+
+/// A pair of different types sharing an `ignore_type_in_groups` group,
+/// compared as `DeepDiff._diff` goes on once it skips `type_changes`.
+#[inline(never)]
+fn grouped_diff(
+    path: &mut Vec<PathSegment>,
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
+) -> Result<Report, Error> {
+    match (a, b) {
+        (Value::Array(old) | Value::Tuple(old), Value::Array(new) | Value::Tuple(new)) => {
+            array_diff(path, old, new, depth, opts, memo)
+        }
+        (Value::Set(old) | Value::FrozenSet(old), Value::Set(new) | Value::FrozenSet(new)) => {
+            set_diff(path, old, new, depth, opts, memo)
+        }
+        _ => {
+            let key = crate::lcs::python_scalar_key;
+            let equal = !matches!(a, Value::Null)
+                && !matches!(b, Value::Null)
+                && key(a).is_some_and(|old| Some(old) == key(b));
+            scalar_diff(path, equal, a, b, depth, opts.max_depth)
+        }
+    }
+}
+
+/// `_diff_str` under `ignore_string_case`: both strings lowered before
+/// comparing and reporting them. Off [`diff_at`]'s frame, which bounds `max_depth`.
+#[inline(never)]
+fn case_folded_diff(
+    path: &[PathSegment],
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Report, Error> {
+    let (a, b) = (lowered(a), lowered(b));
+    scalar_diff(path, a == b, &a, &b, depth, max_depth)
+}
+
+/// A string `str.lower()`ed; one holding a lone surrogate is kept as is.
+fn lowered(value: &Value) -> Value {
+    match value {
+        Value::Str(s) => match s.as_utf8() {
+            Some(text) => Value::Str(crate::value::Str::Utf8(text.to_lowercase().into())),
+            None => value.clone(),
+        },
+        _ => value.clone(),
+    }
 }

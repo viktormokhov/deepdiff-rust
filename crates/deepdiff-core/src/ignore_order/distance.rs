@@ -252,8 +252,8 @@ pub(crate) fn count_diff_leaves(
         }
         (Value::TimeDelta(x), Value::TimeDelta(y)) => usize::from(x != y),
         (Value::Number(x), Value::Number(y)) => {
-            if x.is_f64() == y.is_f64() {
-                usize::from(!crate::diff::numbers_equal(x, y))
+            if x.is_f64() == y.is_f64() || opts.same_group(a, b) {
+                usize::from(!crate::diff::numbers_match(x, y, opts))
             } else {
                 type_change_leaf_length(a, b)
             }

@@ -139,6 +139,15 @@ fn classify_temporal(
     path: &[PathSegment],
     held: &mut Held,
 ) -> PyResult<Option<CValue>> {
+    let truncated;
+    let current = match &held.truncate_datetime {
+        // `truncate_datetime`: the report carries the truncated datetime too.
+        Some(fields) if current.cast::<PyDateTime>().is_ok() => {
+            truncated = current.call_method("replace", (), Some(fields.bind(current.py())))?;
+            &truncated
+        }
+        _ => current,
+    };
     if current.cast_exact::<PyDateTime>().is_ok() {
         return Ok(Some(datetime_to_value(current, path, None)?));
     }
@@ -420,6 +429,8 @@ pub(crate) struct Held {
     /// `exclude_types`, and the paths in either input holding an instance of one.
     pub(crate) exclude_types: Option<Py<PyAny>>,
     pub(crate) excluded: BTreeSet<Vec<PathSegment>>,
+    /// The `datetime.replace` fields `truncate_datetime` zeroes.
+    pub(crate) truncate_datetime: Option<Py<PyDict>>,
     pub(crate) saw_wtf8: bool,
     pub(crate) needs_render: bool,
     pub(crate) needs_worker: bool,
@@ -449,6 +460,7 @@ impl Held {
             types: HashMap::new(),
             exclude_types: None,
             excluded: BTreeSet::new(),
+            truncate_datetime: None,
             saw_wtf8: false,
             needs_render: false,
             needs_worker: false,

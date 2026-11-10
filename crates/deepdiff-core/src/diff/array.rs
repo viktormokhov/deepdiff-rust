@@ -48,7 +48,7 @@ fn lcs_or_positional_array_diff(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
-    let lcs_report = lcs_array_diff(path, a, b, depth, opts.max_depth)?;
+    let lcs_report = lcs_array_diff(path, a, b, depth, opts, memo)?;
     if lcs_report.finding_count() > 1 {
         let positional_report = positional_array_diff(path, a, b, depth, opts, memo)?;
         if lcs_report.finding_count() >= positional_report.finding_count() {
@@ -163,7 +163,8 @@ fn lcs_array_diff(
     a: &[Value],
     b: &[Value],
     depth: usize,
-    max_depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     let mut report = Report::new();
 
@@ -205,17 +206,28 @@ fn lcs_array_diff(
                     } else {
                         let old_idx = op.a1 + offset;
                         let new_idx = op.b1 + offset;
+                        let (old_value, new_value) = (&a[old_idx], &b[new_idx]);
+                        if opts.normalizes() {
+                            let pair = LcsPair {
+                                old_idx,
+                                new_idx,
+                                old_value,
+                                new_value,
+                            };
+                            report.merge(pair_report(path, pair, depth, opts, memo)?);
+                            continue;
+                        }
                         insert_lcs_pair_finding(
                             &mut report,
                             path,
                             LcsPair {
                                 old_idx,
                                 new_idx,
-                                old_value: &a[old_idx],
-                                new_value: &b[new_idx],
+                                old_value,
+                                new_value,
                             },
                             depth,
-                            max_depth,
+                            opts.max_depth,
                         )?;
                     }
                 }
@@ -229,6 +241,27 @@ fn lcs_array_diff(
 /// surplus tail becomes `iterable_item_removed`/`iterable_item_added` at its original indices.
 /// Each surplus clone is checked with [`check_value_depth`] first
 /// (`docs/design/depth-budget.md`).
+/// A `replace` pair under normalizing options: `DeepDiff` sends each
+/// `difflib` pair through `_diff`, with the pair's `t2` index as `new_path`.
+fn pair_report(
+    path: &mut Vec<PathSegment>,
+    pair: LcsPair<'_>,
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
+) -> Result<Report, Error> {
+    scoped(path, PathSegment::Index(pair.old_idx), |path| {
+        let mut report = diff_at(path, pair.old_value, pair.new_value, depth + 1, opts, memo)?;
+        if pair.old_idx != pair.new_idx {
+            let mut new_path = path.clone();
+            *new_path.last_mut().expect("scoped pushed the index") =
+                PathSegment::Index(pair.new_idx);
+            report.set_new_path(path, new_path);
+        }
+        Ok(report)
+    })
+}
+
 fn positional_array_diff(
     path: &mut Vec<PathSegment>,
     a: &[Value],

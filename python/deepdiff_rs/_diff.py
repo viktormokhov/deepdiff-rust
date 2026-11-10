@@ -5,6 +5,7 @@ import datetime
 import json
 
 from . import _native
+from ._options import native_options
 from ._paths import skip_filter
 
 _BUILTIN_TYPES = {
@@ -48,7 +49,11 @@ class DeepDiff(dict):
     def __init__(
         self, t1, t2, *, ignore_order=False, max_depth=None, verbose_level=1, view="text",
         exclude_paths=None, exclude_regex_paths=None, include_paths=None, exclude_types=None,
-        ignore_private_variables=True,
+        ignore_private_variables=True, significant_digits=None, number_format_notation="f",
+        math_epsilon=None, use_log_scale=False, log_scale_similarity_threshold=0.1,
+        ignore_nan_inequality=False, ignore_string_case=False, ignore_numeric_type_changes=False,
+        ignore_string_type_changes=False, ignore_type_in_groups=None, ignore_type_subclasses=False,
+        truncate_datetime=None,
     ):
         if view != "text":
             raise NotImplementedError(f"view={view!r} is not supported yet; only view='text' is.")
@@ -60,6 +65,18 @@ class DeepDiff(dict):
         self._native = _native.DeepDiff(
             t1, t2, ignore_order=ignore_order, max_depth=max_depth, exclude_types=exclude_types,
             ignore_private_variables=ignore_private_variables, skip=skip,
+            **native_options(
+                _BUILTIN_TYPES, significant_digits=significant_digits,
+                number_format_notation=number_format_notation, math_epsilon=math_epsilon,
+                use_log_scale=use_log_scale,
+                log_scale_similarity_threshold=log_scale_similarity_threshold,
+                ignore_nan_inequality=ignore_nan_inequality, ignore_string_case=ignore_string_case,
+                ignore_numeric_type_changes=ignore_numeric_type_changes,
+                ignore_string_type_changes=ignore_string_type_changes,
+                ignore_type_in_groups=ignore_type_in_groups,
+                ignore_type_subclasses=ignore_type_subclasses,
+                truncate_datetime=truncate_datetime,
+            ),
         )
         super().__init__(self.to_dict())
 

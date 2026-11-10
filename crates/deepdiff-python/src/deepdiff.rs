@@ -3,9 +3,9 @@
 //! the result as `.to_json()`/`.to_dict()`. Supported types and raised
 //! errors: the README's "Known limitations" section.
 
-use deepdiff_core::Value;
 use deepdiff_core::diff::Resolution;
 use deepdiff_core::path::{PathSegment, render_path};
+use deepdiff_core::{DiffOptions, Value};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 use std::borrow::Cow;
@@ -41,7 +41,7 @@ pub(crate) struct DeepDiff {
 #[pymethods]
 impl DeepDiff {
     #[new]
-    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None, exclude_types=None, ignore_private_variables=true, skip=None))]
+    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None, exclude_types=None, ignore_private_variables=true, skip=None, significant_digits=None, exponent_notation=false, math_epsilon=None, log_scale_threshold=None, ignore_nan_inequality=false, ignore_string_case=false, ignore_numeric_type_changes=false, type_groups=None, group_mask=None, truncate_datetime=None))]
     #[allow(clippy::too_many_arguments)] // mirrors the Python keyword signature
     fn new(
         py: Python<'_>,
@@ -52,14 +52,46 @@ impl DeepDiff {
         exclude_types: Option<Bound<'_, PyAny>>,
         ignore_private_variables: bool,
         skip: Option<Py<PyAny>>,
+        significant_digits: Option<usize>,
+        exponent_notation: bool,
+        math_epsilon: Option<f64>,
+        log_scale_threshold: Option<f64>,
+        ignore_nan_inequality: bool,
+        ignore_string_case: bool,
+        ignore_numeric_type_changes: bool,
+        type_groups: Option<HashMap<String, u64>>,
+        group_mask: Option<Py<PyAny>>,
+        truncate_datetime: Option<Py<PyDict>>,
     ) -> PyResult<Self> {
-        let opts = resolve_options(max_depth, ignore_order)?;
+        let mut opts = DiffOptions {
+            significant_digits,
+            exponent_notation,
+            math_epsilon,
+            log_scale_threshold,
+            ignore_nan_inequality,
+            ignore_string_case,
+            ignore_numeric_type_changes,
+            ..resolve_options(max_depth, ignore_order)?
+        };
         let mut held = Held::new(opts.max_depth);
         held.exclude_types = exclude_types.map(Bound::unbind);
+        held.truncate_datetime = truncate_datetime;
         let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
         let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
         // A class attribute or cycle token is resolved the first time the
         // diff compares one, then the diff reruns with it available.
+        if let Some(group_mask) = &group_mask {
+            let mut groups: HashMap<Box<str>, u64> = type_groups
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, mask)| (name.into(), mask))
+                .collect();
+            for (name, class) in &held.types {
+                let mask = group_mask.call1(py, (class,))?.extract(py)?;
+                groups.insert(name.as_ref().into(), mask);
+            }
+            opts.type_groups = Some(Arc::new(groups));
+        }
         // ponytail: filters drop findings after the diff instead of pruning it, so an
         // excluded part still pairs under ignore_order; prune in the core if that matters.
         let excluded = std::mem::take(&mut held.excluded);
@@ -108,7 +140,7 @@ impl DeepDiff {
                     Python::attach(|py| resolve_token(py, identity, held, !deep))
                         .map(Resolution::Shared)
                 };
-                diff_to_value(py, a, b, opts, &mut resolver, deep, Some(&keep))?
+                diff_to_value(py, a, b, &opts, &mut resolver, deep, Some(&keep))?
             };
             if held.needs_worker && !deep {
                 deep = true;

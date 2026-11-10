@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::path::{PathSegment, render_path};
 use crate::report::{Report, TypeChangeEntry, ValuesChangedEntry};
 
-use super::check_value_depth;
+use super::{DiffOptions, check_value_depth};
 
 /// The base-type name for `value`, ignoring any subclass name ([`effective_type_name`] has that).
 /// A number is `"float"` when its literal has a decimal point or exponent, else `"int"`.
@@ -149,12 +149,36 @@ pub(crate) fn numeric_diff(
     a: &Value,
     b: &Value,
     depth: usize,
-    max_depth: usize,
+    opts: &DiffOptions,
 ) -> Result<Report, Error> {
-    if old.is_f64() != new.is_f64() {
-        return type_change_report(path, a, b, depth, max_depth);
+    if old.is_f64() != new.is_f64() && !opts.same_group(a, b) {
+        return type_change_report(path, a, b, depth, opts.max_depth);
     }
-    scalar_diff(path, numbers_equal(old, new), a, b, depth, max_depth)
+    let equal = numbers_match(old, new, opts);
+    scalar_diff(path, equal, a, b, depth, opts.max_depth)
+}
+/// `_diff_numbers`'s equality under the numeric options, after
+/// `ignore_nan_inequality`'s `nan` shortcut.
+#[inline(never)]
+pub(crate) fn numbers_match(old: &Number, new: &Number, opts: &DiffOptions) -> bool {
+    use crate::normalize::{as_float, is_close, log_distance, number_to_string};
+    let (x, y) = (as_float(old), as_float(new));
+    if opts.ignore_nan_inequality && old.is_f64() && x.is_nan() && new.is_f64() && y.is_nan() {
+        return true;
+    }
+    if let Some(threshold) = opts.log_scale_threshold {
+        return log_distance(x, y) < threshold;
+    }
+    if let Some(epsilon) = opts.math_epsilon {
+        return is_close(x, y, epsilon);
+    }
+    match opts.significant_digits {
+        Some(digits) => {
+            let e = opts.exponent_notation;
+            number_to_string(old, digits, e) == number_to_string(new, digits, e)
+        }
+        None => crate::normalize::numbers_python_equal(old, new),
+    }
 }
 /// Numeric equality shared by [`numeric_diff`] and [`values_equal`](super::values_equal): an int
 /// and a float are never equal, floats compare by IEEE-754 `==`, ints by value across

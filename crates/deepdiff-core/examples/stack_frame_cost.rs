@@ -92,6 +92,7 @@ fn run_probe(shape: &str, depth: usize, stack: Option<usize>) -> ! {
             let opts = DiffOptions {
                 max_depth: depth + 1,
                 ignore_order: shape == "pairing",
+                ..DiffOptions::default()
             };
             let report = diff_with_options(&a, &b, &opts).expect("depth budget covers the input");
             assert!(!report.is_empty(), "unequal inputs must produce a finding");

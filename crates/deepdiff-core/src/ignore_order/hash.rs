@@ -2,6 +2,7 @@
 //! ([`HashedList`]) matching `DeepHash`'s item matching under `ignore_order=True`; see
 //! `docs/design/ignore-order.md`.
 
+use crate::normalize::{HashNorm, fold_case, number_to_string};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
@@ -152,6 +153,9 @@ pub(crate) enum ItemKey {
     /// An [`ObjectKind::Opaque`](crate::value::ObjectKind) token, by its Python object's identity
     /// (cost: `fxhash.rs`).
     Opaque(Box<str>),
+    /// A number by its `significant_digits` string, type-tagged (float or
+    /// not) unless `ignore_numeric_type_changes`.
+    Rounded(Option<bool>, Box<str>),
 }
 
 /// Hand-written so the `Float` arm runs through [`mix_float_bits`]; every other arm hashes as
@@ -174,6 +178,10 @@ impl std::hash::Hash for ItemKey {
             Self::Tuple(items) => items.hash(state),
             Self::Dict(map) => map.hash(state),
             Self::Opaque(identity) => identity.hash(state),
+            Self::Rounded(tag, text) => {
+                tag.hash(state);
+                text.hash(state);
+            }
             Self::Object(class, map) => {
                 class.hash(state);
                 map.hash(state);
@@ -346,7 +354,8 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> RepId {
             | Value::Date(_)
             | Value::Time(_)
             | Value::TimeDelta(_) => {
-                let rep = memo.content_rep(MemberContent::Scalar(scalar_content_key(value)));
+                let rep =
+                    memo.content_rep(MemberContent::Scalar(scalar_content_key(value, memo.norm)));
                 let part = python_scalar_key(value)
                     .map(MemberPart::Scalar)
                     .expect("python_scalar_key covers every scalar");
@@ -443,12 +452,12 @@ fn build_container(
 }
 
 /// The content digest of one scalar leaf, matching [`keyed`]'s scalar arms.
-fn scalar_content_key(value: &Value) -> ItemKey {
+fn scalar_content_key(value: &Value, norm: HashNorm) -> ItemKey {
     match value {
         Value::Null => ItemKey::Null,
         Value::Bool(b) => ItemKey::Bool(*b),
-        Value::Number(n) => number_key(n),
-        Value::Str(s) => ItemKey::Str(s.as_bytes().to_vec()),
+        Value::Number(n) => leaf_number_key(n, norm),
+        Value::Str(s) => leaf_str_key(s, norm),
         Value::DateTime(dt) => ItemKey::DateTime(dt.instant()),
         Value::Date(date) => ItemKey::Date(date.ordinal()),
         Value::Time(time) => ItemKey::Time(time.hash_seconds_of_day()),
@@ -490,6 +499,22 @@ fn number_key(n: &crate::value::Number) -> ItemKey {
     ))
 }
 
+/// [`number_key`], or the `significant_digits` string `DeepHash._prep_number` hashes.
+fn leaf_number_key(n: &crate::value::Number, norm: HashNorm) -> ItemKey {
+    match norm.significant_digits {
+        Some(digits) => ItemKey::Rounded(
+            (!norm.ignore_numeric_type_changes).then(|| n.is_f64()),
+            number_to_string(n, digits, norm.exponent_notation).into(),
+        ),
+        None => number_key(n),
+    }
+}
+
+/// A string's key, case-folded under `ignore_string_case`.
+fn leaf_str_key(s: &crate::value::Str, norm: HashNorm) -> ItemKey {
+    ItemKey::Str(fold_case(s, norm.ignore_string_case).into_owned())
+}
+
 /// Computes `value`'s [`ItemKey`]; a tuple Python-equal to one hashed earlier in the diff inherits
 /// its key through `memo` (`docs/design/ignore-order.md`, "Distance memo"). Recurses natively:
 /// callers first prove the nesting within [`check_value_depth`](crate::diff::check_value_depth)
@@ -511,12 +536,12 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
     match value {
         Value::Null => (ItemKey::Null, part()),
         Value::Bool(b) => (ItemKey::Bool(*b), part()),
-        Value::Str(s) => (ItemKey::Str(s.as_bytes().to_vec()), part()),
+        Value::Str(s) => (leaf_str_key(s, memo.norm), part()),
         Value::DateTime(value) => (ItemKey::DateTime(value.instant()), part()),
         Value::Date(value) => (ItemKey::Date(value.ordinal()), part()),
         Value::Time(value) => (ItemKey::Time(value.hash_seconds_of_day()), part()),
         Value::TimeDelta(value) => (ItemKey::TimeDelta(value.value()), part()),
-        Value::Number(n) => (number_key(n), part()),
+        Value::Number(n) => (leaf_number_key(n, memo.norm), part()),
         Value::Array(items) => (
             ItemKey::List(items.iter().map(|i| item_key(i, memo)).collect()),
             None,

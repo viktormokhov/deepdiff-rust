@@ -85,6 +85,7 @@ pub(crate) fn resolve_options(
     Ok(DiffOptions {
         max_depth,
         ignore_order,
+        ..DiffOptions::default()
     })
 }
 
@@ -101,7 +102,7 @@ pub(crate) fn diff_to_value<'r>(
     py: Python<'_>,
     a: &Value,
     b: &Value,
-    opts: DiffOptions,
+    opts: &DiffOptions,
     resolver: &'r mut Resolver<'r>,
     deep: bool,
     keep: Option<&Keep<'_>>,
@@ -109,7 +110,7 @@ pub(crate) fn diff_to_value<'r>(
     let mut resolver = Some(resolver);
     let mut diff = move || {
         let resolver = resolver.take().expect("the diff runs once");
-        deepdiff_core::diff::diff_with_resolver(a, b, &opts, resolver).map(|mut report| {
+        deepdiff_core::diff::diff_with_resolver(a, b, opts, resolver).map(|mut report| {
             if let Some(keep) = keep {
                 report.retain(keep);
             }

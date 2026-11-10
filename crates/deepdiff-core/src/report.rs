@@ -288,6 +288,16 @@ impl Report {
         Self::default()
     }
 
+    /// Sets `new_path` on the `type_changes`/`values_changed` finding at `at`.
+    pub(crate) fn set_new_path(&mut self, at: &[PathSegment], new_path: Vec<PathSegment>) {
+        if let Some(entry) = self.type_changes.get_mut(at) {
+            entry.new_path = Some(new_path.clone());
+        }
+        if let Some(entry) = self.values_changed.get_mut(at) {
+            entry.new_path = Some(new_path);
+        }
+    }
+
     /// Drops every finding whose structural path `keep` rejects.
     pub fn retain(&mut self, mut keep: impl FnMut(&[PathSegment]) -> bool) {
         self.type_changes.retain(|path, _| keep(path));

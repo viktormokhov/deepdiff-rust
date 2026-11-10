@@ -30,6 +30,18 @@ class DeepDiff(dict[str, Any]):
         include_paths: str | Iterable[str] | None = ...,
         exclude_types: Iterable[type] | None = ...,
         ignore_private_variables: bool = ...,
+        significant_digits: int | None = ...,
+        number_format_notation: str = ...,
+        math_epsilon: float | None = ...,
+        use_log_scale: bool = ...,
+        log_scale_similarity_threshold: float = ...,
+        ignore_nan_inequality: bool = ...,
+        ignore_string_case: bool = ...,
+        ignore_numeric_type_changes: bool = ...,
+        ignore_string_type_changes: bool = ...,
+        ignore_type_in_groups: Any = ...,
+        ignore_type_subclasses: bool = ...,
+        truncate_datetime: str | None = ...,
     ) -> None: ...
     def to_dict(self, verbose_level: int | None = ...) -> dict[str, Any]:
         """The differences as a plain dict, with ``type_changes`` types as type objects."""
