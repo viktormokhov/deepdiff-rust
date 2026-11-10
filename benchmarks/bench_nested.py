@@ -30,6 +30,15 @@ def make_tree(groups, records, fields, changed_every=0):
     return tree
 
 
+def as_lists(tree, reverse=False):
+    """Each group becomes a list of its records, optionally in reverse order."""
+    out = {}
+    for name, group in tree.items():
+        records = list(group.values())
+        out[name] = records[::-1] if reverse else records
+    return out
+
+
 def timed(fn, repeats):
     samples, result = [], None
     for _ in range(repeats):
@@ -47,20 +56,24 @@ def main():
     parser.add_argument("--changed-every", type=int, default=1000)
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--python-repeats", type=int, default=1)
+    parser.add_argument("--ignore-order", action="store_true")
     args = parser.parse_args()
 
     shape = (args.groups, args.records, args.fields)
     t1, t2 = make_tree(*shape), make_tree(*shape, changed_every=args.changed_every)
     print(f"leaves: {args.groups * args.records * args.fields:,}")
 
-    cases = [("equal", t1, make_tree(*shape)), ("changed", t1, t2)]
-    for name, a, b in cases:
-        rust_s, rust = timed(lambda: RustDeepDiff(a, b), args.repeats)
-        python_s, python = timed(lambda: PythonDeepDiff(a, b), args.python_repeats)
+    cases = [("equal", t1, make_tree(*shape), {}), ("changed", t1, t2, {})]
+    if args.ignore_order:
+        lists = (as_lists(t1), as_lists(t2, reverse=True), {"ignore_order": True})
+        cases.append(("ignore_order", *lists))
+    for name, a, b, kw in cases:
+        rust_s, rust = timed(lambda: RustDeepDiff(a, b, **kw), args.repeats)
+        python_s, python = timed(lambda: PythonDeepDiff(a, b, **kw), args.python_repeats)
         assert rust == python, f"{name}: reports differ"
-        changes = len(rust.get("values_changed", {}))
+        changes = sum(map(len, rust.values()))
         print(
-            f"{name:8} values_changed={changes:<6} deepdiff={python_s:8.2f}s "
+            f"{name:12} changes={changes:<6} deepdiff={python_s:8.2f}s "
             f"deepdiff_rs={rust_s:6.3f}s  x{python_s / rust_s:,.0f}"
         )
 
