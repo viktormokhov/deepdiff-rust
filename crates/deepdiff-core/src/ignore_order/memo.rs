@@ -44,6 +44,9 @@ pub(crate) struct IgnoreOrderMemo<'r> {
     enabled: bool,
     /// The leaf normalization item keys apply.
     pub(crate) norm: crate::normalize::HashNorm,
+    /// `DeepDiff`'s `DIFF COUNT` and `PASSES COUNT`, shared across the run as its `_stats` is.
+    diffs: std::cell::Cell<usize>,
+    passes: std::cell::Cell<usize>,
     /// Count of [`Self::put`] calls, not just distinct entries: the
     /// signal that rises if a caller recomputes a distance instead of
     /// reusing the cache. Test-only.
@@ -64,6 +67,8 @@ impl<'r> IgnoreOrderMemo<'r> {
             resolutions: RefCell::new(BTreeMap::new()),
             enabled: true,
             norm: crate::normalize::HashNorm::default(),
+            diffs: std::cell::Cell::new(0),
+            passes: std::cell::Cell::new(0),
             #[cfg(test)]
             puts: std::cell::Cell::new(0),
         }
@@ -83,8 +88,27 @@ impl<'r> IgnoreOrderMemo<'r> {
             resolutions: RefCell::new(BTreeMap::new()),
             enabled: false,
             norm: crate::normalize::HashNorm::default(),
+            diffs: std::cell::Cell::new(0),
+            passes: std::cell::Cell::new(0),
             puts: std::cell::Cell::new(0),
         }
+    }
+
+    /// `DeepDiff`'s `_count_diff`: counts one comparison step, or returns `true` (stop) once
+    /// `max_diffs` steps have run.
+    pub(crate) fn over_max_diffs(&self, opts: &crate::diff::DiffOptions) -> bool {
+        if opts.max_diffs.is_some_and(|max| self.diffs.get() > max) {
+            return true;
+        }
+        self.diffs.set(self.diffs.get() + 1);
+        false
+    }
+
+    /// Takes one of `max_passes` get-pairs passes, `false` once they are spent.
+    pub(crate) fn take_pass(&self, opts: &crate::diff::DiffOptions) -> bool {
+        let taken = self.passes.get() < opts.max_passes;
+        self.passes.set(self.passes.get() + usize::from(taken));
+        taken
     }
 
     /// A live memo that compares a token as the value `resolver` returns for

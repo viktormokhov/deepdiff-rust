@@ -191,6 +191,9 @@ fn lcs_array_diff(
                 let a_len = op.a2 - op.a1;
                 let b_len = op.b2 - op.b1;
                 for offset in 0..a_len.max(b_len) {
+                    if memo.over_max_diffs(opts) {
+                        break;
+                    }
                     if offset >= b_len {
                         let old_idx = op.a1 + offset;
                         let old_value = &a[old_idx];
@@ -216,6 +219,10 @@ fn lcs_array_diff(
                             };
                             report.merge(pair_report(path, pair, depth, opts, memo)?);
                             continue;
+                        }
+                        // The `_diff` call `DeepDiff` makes for the pair.
+                        if memo.over_max_diffs(opts) {
+                            break;
                         }
                         insert_lcs_pair_finding(
                             &mut report,
@@ -274,13 +281,33 @@ fn positional_array_diff(
     let min_len = a.len().min(b.len());
 
     for i in 0..min_len {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         let sub_report = scoped(path, PathSegment::Index(i), |path| {
             diff_at(path, &a[i], &b[i], depth + 1, opts, memo)
         })?;
         report.merge(sub_report);
     }
+    surplus_tail(path, a, b, depth, opts, memo, &mut report)?;
+    Ok(report)
+}
 
+/// Kept out of [`positional_array_diff`], whose frame is on the recursion path.
+fn surplus_tail(
+    path: &mut Vec<PathSegment>,
+    a: &[Value],
+    b: &[Value],
+    depth: usize,
+    opts: &DiffOptions,
+    memo: &IgnoreOrderMemo,
+    report: &mut Report,
+) -> Result<(), Error> {
+    let min_len = a.len().min(b.len());
     for (i, old_value) in a.iter().enumerate().skip(min_len) {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         scoped(path, PathSegment::Index(i), |path| {
             check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
                 report.insert_iterable_item_removed(path.clone(), old_value.clone());
@@ -289,12 +316,14 @@ fn positional_array_diff(
     }
 
     for (i, new_value) in b.iter().enumerate().skip(min_len) {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         scoped(path, PathSegment::Index(i), |path| {
             check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
                 report.insert_iterable_item_added(path.clone(), new_value.clone());
             })
         })?;
     }
-
-    Ok(report)
+    Ok(())
 }

@@ -33,6 +33,7 @@ pub(crate) fn diff_at(
     check_traversal_depth(path, depth, opts.max_depth)?;
 
     match (a, b) {
+        _ if memo.over_max_diffs(opts) => Ok(Report::new()),
         (Value::Null, Value::Null) => Ok(Report::new()),
         (Value::Bool(old), Value::Bool(new)) => {
             scalar_diff(path, old == new, a, b, depth, opts.max_depth)

@@ -31,7 +31,7 @@ Implemented, checked against `deepdiff==9.1.0`:
 - `zip_ordered_iterables`, `threshold_to_diff_deeper`,
   `cutoff_distance_for_pairs`, `cutoff_intersection_for_pairs`,
   `get_deep_distance`, `group_by`, `group_by_sort_key`, `report_repetition`
-  (`repetition_change`).
+  (`repetition_change`), `max_passes`, `max_diffs`.
 - `bytes`, `decimal.Decimal`, `uuid.UUID` and `complex` values, keys and
   set members, under the numeric and string options above.
 
@@ -50,6 +50,11 @@ and an `IntEnum` diffs as a plain `int`. `bytes` dict keys (DeepDiff
 crashes) and `UUID` dict keys (DeepDiff reports path `None`) get normal
 paths. A `Decimal` rounds through its nearest `float` under
 `significant_digits` and `math_epsilon`.
+`max_diffs` counts steps where DeepDiff does, except inside the trial
+diffs `ignore_order` runs to pair container items (one step each); it
+does not log DeepDiff's "reached the max number of diffs" warning. Which
+findings survive the limit in a multi-key dict differs, as DeepDiff walks
+keys in `set` order.
 
 Onix implements a useful subset of DeepDiff's core comparison API and converts
 supported live Python objects directly into its native value model. Its documented

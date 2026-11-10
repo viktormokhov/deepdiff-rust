@@ -809,8 +809,14 @@ pub(crate) fn rough_distance(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> Result<f64, Box<Error>> {
+    // `DeepDiff` runs each trial as a child diff sharing its `max_diffs` count; past the
+    // limit that child reports nothing, so only the fast path still sees a distance.
+    let over_max_diffs = memo.over_max_diffs(opts);
     if let Some(distance) = family_distance(removed, added, cutoff) {
         return Ok(distance);
+    }
+    if over_max_diffs {
+        return Ok(0.0);
     }
 
     let diff_length = count_diff_leaves(removed, added, depth, opts, memo)?;

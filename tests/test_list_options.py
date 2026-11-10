@@ -99,3 +99,34 @@ def test_report_repetition_matches_deepdiff(t1, t2, verbose_level) -> None:
 def test_report_repetition_json_matches_deepdiff() -> None:
     a, b = [1, 2, 1], [1, 2]
     assert json.loads(DeepDiff(a, b, **REP).to_json()) == json.loads(RealDeepDiff(a, b, **REP).to_json())
+
+
+# Single-key dicts only: `DeepDiff` walks dict keys through a `set`, so which findings a
+# multi-key dict keeps under `max_diffs` depends on string hashing.
+LIMITED = [
+    ([[1], [2], [3], [4]], [[5], [6], [7], [8]], {}),
+    ({"a": [1]}, {"a": [2]}, {}),
+    ({"a": {"b": {"c": 1}}}, {"a": {"b": {"c": 2}}}, {}),
+    ([1, 2, 3, 4], [1, 5, 6, 4], {}),
+    ([1, 2], [1, 2, 3, 4], {}),
+    ([{"x": 1}, {"y": 2}], [{"x": 3}, {"y": 4}], {}),
+    ((1, 2, 3), (1, 4, 5), {"ignore_string_case": True}),
+    ([1, 2, 3], [3, 1, 4], IO),
+    ([[1, 2], [3]], [[3], [2, 9]], IO),
+    ([1, 2, 1], [2, 3], REP),
+]
+
+
+@pytest.mark.filterwarnings("ignore")
+@pytest.mark.parametrize("max_diffs", range(12))
+@pytest.mark.parametrize(("t1", "t2", "kwargs"), LIMITED)
+def test_max_diffs_matches_deepdiff(t1, t2, kwargs, max_diffs) -> None:
+    kwargs = {**kwargs, "max_diffs": max_diffs}
+    assert DeepDiff(t1, t2, **kwargs) == RealDeepDiff(t1, t2, **kwargs)
+
+
+@pytest.mark.parametrize("max_passes", [0, 1, 2, 100])
+@pytest.mark.parametrize(("t1", "t2"), [([[1, 2], [3]], [[3], [2, 9]]), ([[1, [2, 3]]], [[[3, 4], 1]])])
+def test_max_passes_matches_deepdiff(t1, t2, max_passes) -> None:
+    kwargs = {**IO, "max_passes": max_passes}
+    assert DeepDiff(t1, t2, **kwargs) == RealDeepDiff(t1, t2, **kwargs)

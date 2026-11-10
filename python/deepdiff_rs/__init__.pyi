@@ -52,6 +52,8 @@ class DeepDiff(dict[str, Any]):
         group_by: Any = ...,
         group_by_sort_key: Any = ...,
         report_repetition: bool = ...,
+        max_diffs: int | None = ...,
+        max_passes: int = ...,
     ) -> None: ...
     def to_dict(self, verbose_level: int | None = ...) -> dict[str, Any]:
         """The differences as a plain dict, with ``type_changes`` types as type objects."""

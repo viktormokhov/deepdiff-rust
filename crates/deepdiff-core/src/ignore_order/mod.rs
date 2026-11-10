@@ -70,18 +70,8 @@ pub(crate) fn ignore_order_array_diff(
     let t1 = HashedList::build(a, memo);
     let t2 = HashedList::build(b, memo);
 
-    let hashes_added: Vec<Rc<ItemKey>> = t2
-        .distinct_order
-        .iter()
-        .filter(|key| !t1.contains(key))
-        .cloned()
-        .collect();
-    let hashes_removed: Vec<Rc<ItemKey>> = t1
-        .distinct_order
-        .iter()
-        .filter(|key| !t2.contains(key))
-        .cloned()
-        .collect();
+    let hashes_added = unmatched(&t2, &t1);
+    let hashes_removed = unmatched(&t1, &t2);
 
     #[allow(
         clippy::cast_precision_loss,
@@ -90,7 +80,7 @@ pub(crate) fn ignore_order_array_diff(
     let get_pairs = {
         let ratio = (hashes_added.len() + hashes_removed.len()) as f64
             / (t1.distinct_order.len() + t2.distinct_order.len() + 1) as f64;
-        ratio <= opts.cutoff_intersection_for_pairs
+        ratio <= opts.cutoff_intersection_for_pairs && memo.take_pass(opts)
     };
 
     let pairs = if get_pairs {
@@ -109,6 +99,9 @@ pub(crate) fn ignore_order_array_diff(
     let rep = opts.report_repetition;
 
     for added_key in &hashes_added {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         let (new_idx, new_value) = t2.get(added_key);
 
         if let Some(removed_key) = pairs.get(added_key) {
@@ -156,6 +149,9 @@ pub(crate) fn ignore_order_array_diff(
         if consumed_removed.contains(removed_key) {
             continue;
         }
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         let (old_idx, old_value) = t1.get(removed_key);
         let old_indexes = if rep {
             t1.indexes(removed_key)
@@ -174,6 +170,15 @@ pub(crate) fn ignore_order_array_diff(
     }
 
     Ok(report)
+}
+
+/// `list`'s distinct keys, in order, that `other` does not hold.
+fn unmatched(list: &HashedList<'_>, other: &HashedList<'_>) -> Vec<Rc<ItemKey>> {
+    list.distinct_order
+        .iter()
+        .filter(|key| !other.contains(key))
+        .cloned()
+        .collect()
 }
 
 /// `report_repetition`'s `repetition_change` for each item the two lists hold a different

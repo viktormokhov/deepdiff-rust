@@ -57,6 +57,10 @@ pub struct DiffOptions {
     pub get_deep_distance: bool,
     /// `report_repetition`: under `ignore_order`, count repeats and report `repetition_change`.
     pub report_repetition: bool,
+    /// `max_diffs`: stop comparing after this many steps.
+    pub max_diffs: Option<usize>,
+    /// `max_passes`: get-pairs passes before `ignore_order` stops pairing.
+    pub max_passes: usize,
 }
 
 impl Default for DiffOptions {
@@ -79,6 +83,8 @@ impl Default for DiffOptions {
             zip_ordered_iterables: false,
             get_deep_distance: false,
             report_repetition: false,
+            max_diffs: None,
+            max_passes: 10_000_000,
         }
     }
 }

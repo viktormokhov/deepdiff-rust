@@ -62,6 +62,9 @@ pub(crate) fn object_diff(
 
     // Added/removed keys are checked at `depth + 1`, the depth their own path sits at.
     for (key, old_value) in a {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         scoped(
             path,
             entry_path_segment(kind, key),
@@ -81,6 +84,9 @@ pub(crate) fn object_diff(
 
     for (key, new_value) in b {
         if !a.contains_key(key) {
+            if memo.over_max_diffs(opts) {
+                break;
+            }
             scoped(path, entry_path_segment(kind, key), |path| {
                 check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
                     insert_added(&mut report, kind, path.clone(), new_value.clone());
@@ -129,12 +135,18 @@ fn object_diff_mixed(
     let matched = crate::ignore_order::match_dict_keys(a, b);
 
     for (key, old_value, new_value) in matched.shared {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         scoped(path, key_segment(key), |path| {
             diff_at(path, old_value, new_value, depth + 1, opts, memo)
                 .map(|sub_report| report.merge(sub_report))
         })?;
     }
     for (key, old_value) in matched.only_a {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         scoped(path, key_segment(key), |path| {
             check_value_depth(path, old_value, depth + 1, opts.max_depth).map(|()| {
                 report.insert_dictionary_item_removed(path.clone(), old_value.clone());
@@ -142,6 +154,9 @@ fn object_diff_mixed(
         })?;
     }
     for (key, new_value) in matched.only_b {
+        if memo.over_max_diffs(opts) {
+            break;
+        }
         scoped(path, key_segment(key), |path| {
             check_value_depth(path, new_value, depth + 1, opts.max_depth).map(|()| {
                 report.insert_dictionary_item_added(path.clone(), new_value.clone());
