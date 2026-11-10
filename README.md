@@ -39,7 +39,7 @@ The project distribution is named `deepdiff-rust`; its import package is `deepdi
   revision. See [ADR 0001](docs/architecture/adr-0001-onix-core.md).
 - `crates/deepdiff-python`: PyO3 extension and the public Python package
   integration.
-- `python/deepdiff`: Python import facade.
+- `python/deepdiff_rs`: Python import facade.
 - `tests`: Python API and differential tests.
 
 The upstream Rust core performs structural comparison. The Python adapter
