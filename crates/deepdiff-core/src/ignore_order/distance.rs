@@ -649,7 +649,7 @@ pub(crate) fn match_dict_keys<'a>(a: &'a Object, b: &'a Object) -> DictKeyMatch<
 /// The `threshold_to_diff_deeper` ratio check shared by [`count_object_diff_leaves`] and
 /// `crate::diff::object_diff`. All-`str` keys are counted by merging the two ascending key
 /// sequences, with no hashing.
-pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool {
+pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object, threshold: f64) -> bool {
     // Non-`str` keys sort last, so with one such side the merge below counts the same
     // intersection as `match_dict_keys`.
     let (union_len, intersect_len) = if a.has_non_str_keys() || b.has_non_str_keys() {
@@ -683,7 +683,7 @@ pub(crate) fn is_below_threshold_to_diff_deeper(a: &Object, b: &Object) -> bool 
         reason = "key counts are small, far under f64's exact-integer range"
     )]
     {
-        union_len > 1 && (intersect_len as f64 / union_len as f64) < THRESHOLD_TO_DIFF_DEEPER
+        union_len > 1 && (intersect_len as f64 / union_len as f64) < threshold
     }
 }
 
@@ -697,7 +697,7 @@ pub(crate) fn count_object_diff_leaves(
     opts: &DiffOptions,
     memo: &IgnoreOrderMemo,
 ) -> Result<usize, Box<Error>> {
-    if is_below_threshold_to_diff_deeper(a, b) {
+    if is_below_threshold_to_diff_deeper(a, b, opts.threshold_to_diff_deeper) {
         return Ok(if b.is_custom_object() {
             b.lengths().dict_len
         } else {
@@ -818,5 +818,19 @@ pub(crate) fn rough_distance(
     )]
     {
         Ok(diff_length as f64 / rough_len as f64)
+    }
+}
+
+/// [`rough_distance`] with the diff already run: `diff_length` is its report's leaf length.
+pub(crate) fn deep_distance(a: &Value, b: &Value, diff_length: usize, opts: &DiffOptions) -> f64 {
+    if let Some(distance) = family_distance(a, b, opts.cutoff_distance_for_pairs) {
+        return distance;
+    }
+    if diff_length == 0 {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss, reason = "structural node counts")]
+    {
+        diff_length as f64 / (rough_length(a) + rough_length(b)) as f64
     }
 }

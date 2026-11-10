@@ -107,7 +107,7 @@ pub(crate) fn diff_to_value<'r>(
     resolver: &'r mut Resolver<'r>,
     deep: bool,
     keep: Option<&Keep<'_>>,
-) -> PyResult<Value> {
+) -> PyResult<(Value, Option<f64>)> {
     let mut resolver = Some(resolver);
     let mut diff = move || {
         let resolver = resolver.take().expect("the diff runs once");
@@ -115,7 +115,10 @@ pub(crate) fn diff_to_value<'r>(
             if let Some(keep) = keep {
                 report.retain(keep);
             }
-            report.to_value()
+            let distance = opts
+                .get_deep_distance
+                .then(|| report.deep_distance(a, b, opts));
+            (report.to_value(), distance)
         })
     };
     if deep || is_deep(a) || is_deep(b) {

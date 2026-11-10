@@ -28,6 +28,9 @@ Implemented, checked against `deepdiff==9.1.0`:
   `ignore_string_type_changes`, `ignore_type_in_groups`,
   `ignore_type_subclasses`, `truncate_datetime` (datetimes),
   `ignore_uuid_types`, `use_enum_value`.
+- `zip_ordered_iterables`, `threshold_to_diff_deeper`,
+  `cutoff_distance_for_pairs`, `cutoff_intersection_for_pairs`,
+  `get_deep_distance`, `group_by`, `group_by_sort_key`.
 - `bytes`, `decimal.Decimal`, `uuid.UUID` and `complex` values, keys and
   set members, under the numeric and string options above.
 

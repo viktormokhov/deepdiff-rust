@@ -76,7 +76,7 @@ pub(crate) fn compute_pairs(
                 let computed = rough_distance(
                     removed_value,
                     added_value,
-                    CUTOFF_DISTANCE_FOR_PAIRS,
+                    opts.cutoff_distance_for_pairs,
                     depth,
                     opts,
                     memo,
@@ -87,7 +87,7 @@ pub(crate) fn compute_pairs(
                 }
                 computed
             };
-            if distance >= CUTOFF_DISTANCE_FOR_PAIRS {
+            if distance >= opts.cutoff_distance_for_pairs {
                 continue;
             }
 

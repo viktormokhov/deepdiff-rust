@@ -870,7 +870,11 @@ fn mixed_key_union_sums_shared_and_one_sided_keys() {
         json!(21),
         json!(22),
     ]);
-    assert!(!super::is_below_threshold_to_diff_deeper(&a, &b));
+    assert!(!super::is_below_threshold_to_diff_deeper(
+        &a,
+        &b,
+        THRESHOLD_TO_DIFF_DEEPER
+    ));
 }
 
 fn max_depth_exceeded(path: &str, max_depth: usize) -> crate::error::Error {

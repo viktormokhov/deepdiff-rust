@@ -27,7 +27,7 @@ pub(crate) fn object_diff(
     memo: &IgnoreOrderMemo,
 ) -> Result<Report, Error> {
     // The depth check runs before either map is cloned into the finding.
-    if crate::ignore_order::is_below_threshold_to_diff_deeper(a, b) {
+    if crate::ignore_order::is_below_threshold_to_diff_deeper(a, b, opts.threshold_to_diff_deeper) {
         check_map_depth(path, a, depth, opts.max_depth)?;
         check_map_depth(path, b, depth, opts.max_depth)?;
         let old_value = Value::Object(a.clone());

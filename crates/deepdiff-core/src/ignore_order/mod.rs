@@ -13,7 +13,9 @@ mod hash;
 mod memo;
 mod pairing;
 
+pub(crate) use distance::THRESHOLD_TO_DIFF_DEEPER;
 pub(crate) use memo::IgnoreOrderMemo;
+pub(crate) use pairing::CUTOFF_DISTANCE_FOR_PAIRS;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -33,7 +35,8 @@ use hash::{HashedList, ItemKey};
 use pairing::compute_pairs;
 
 pub(crate) use distance::{
-    is_below_threshold_to_diff_deeper, item_length, match_dict_keys, type_change_leaf_length,
+    deep_distance, is_below_threshold_to_diff_deeper, item_length, match_dict_keys,
+    type_change_leaf_length,
 };
 pub(crate) use hash::set_difference;
 #[cfg(test)]
@@ -41,7 +44,7 @@ pub(crate) use hash::set_member_digest;
 
 /// `cutoff_intersection_for_pairs`'s default (`DeepDiff`'s own name;
 /// `CUTOFF_INTERSECTION_FOR_PAIRS_DEFAULT`, diff.py): the get-pairs gate threshold.
-const CUTOFF_INTERSECTION_FOR_PAIRS: f64 = 0.7;
+pub(crate) const CUTOFF_INTERSECTION_FOR_PAIRS: f64 = 0.7;
 
 /// `DeepDiff`'s `_diff_iterable_with_deephash` (diff.py) for one list level.
 pub(crate) fn ignore_order_array_diff(
@@ -92,7 +95,7 @@ pub(crate) fn ignore_order_array_diff(
     let get_pairs = {
         let ratio = (hashes_added.len() + hashes_removed.len()) as f64
             / (t1.distinct_order.len() + t2.distinct_order.len() + 1) as f64;
-        ratio <= CUTOFF_INTERSECTION_FOR_PAIRS
+        ratio <= opts.cutoff_intersection_for_pairs
     };
 
     let pairs = if get_pairs {

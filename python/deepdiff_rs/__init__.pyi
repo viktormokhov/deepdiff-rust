@@ -44,6 +44,13 @@ class DeepDiff(dict[str, Any]):
         truncate_datetime: str | None = ...,
         ignore_uuid_types: bool = ...,
         use_enum_value: bool = ...,
+        threshold_to_diff_deeper: float = ...,
+        cutoff_distance_for_pairs: float = ...,
+        cutoff_intersection_for_pairs: float = ...,
+        zip_ordered_iterables: bool = ...,
+        get_deep_distance: bool = ...,
+        group_by: Any = ...,
+        group_by_sort_key: Any = ...,
     ) -> None: ...
     def to_dict(self, verbose_level: int | None = ...) -> dict[str, Any]:
         """The differences as a plain dict, with ``type_changes`` types as type objects."""

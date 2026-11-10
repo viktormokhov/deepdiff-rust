@@ -34,7 +34,7 @@ pub(crate) fn array_diff(
     if opts.ignore_order {
         return ignore_order::ignore_order_array_diff(path, a, b, depth, opts, memo);
     }
-    if lcs::all_basic_scalars(a) && lcs::all_basic_scalars(b) {
+    if !opts.zip_ordered_iterables && lcs::all_basic_scalars(a) && lcs::all_basic_scalars(b) {
         lcs_or_positional_array_diff(path, a, b, depth, opts, memo)
     } else {
         positional_array_diff(path, a, b, depth, opts, memo)

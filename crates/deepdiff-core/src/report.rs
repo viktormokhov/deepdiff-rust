@@ -490,6 +490,13 @@ impl Report {
         }
     }
 
+    /// `DeepDiff(get_deep_distance=True)`'s `deep_distance` between the `a` and `b` this report
+    /// diffs: `_get_rough_distance` over the finished report.
+    #[must_use]
+    pub fn deep_distance(&self, a: &Value, b: &Value, opts: &crate::DiffOptions) -> f64 {
+        crate::ignore_order::deep_distance(a, b, self.distance_leaf_length(), opts)
+    }
+
     /// `DeepDiff`'s `_get_item_length` over a trial-diff report, the
     /// `rough_distance` numerator; the per-entry rules are
     /// [`crate::ignore_order::item_length`] and

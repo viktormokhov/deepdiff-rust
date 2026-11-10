@@ -7,6 +7,7 @@ import json
 import uuid
 
 from . import _native
+from ._group_by import group_pair
 from ._options import native_options
 from ._paths import skip_filter
 
@@ -57,10 +58,16 @@ class DeepDiff(dict):
         ignore_nan_inequality=False, ignore_string_case=False, ignore_numeric_type_changes=False,
         ignore_string_type_changes=False, ignore_type_in_groups=None, ignore_type_subclasses=False,
         truncate_datetime=None, ignore_uuid_types=False, use_enum_value=False,
+        threshold_to_diff_deeper=0.33, cutoff_distance_for_pairs=0.3,
+        cutoff_intersection_for_pairs=0.7, zip_ordered_iterables=False, get_deep_distance=False,
+        group_by=None, group_by_sort_key=None,
     ):
         if view != "text":
             raise NotImplementedError(f"view={view!r} is not supported yet; only view='text' is.")
         self.verbose_level = _check_verbose_level(verbose_level)
+        if not 0 <= float(cutoff_distance_for_pairs) <= 1:
+            raise ValueError("cutoff_distance_for_pairs needs to be a positive float max 1.")
+        t1, t2 = group_pair(t1, t2, group_by, group_by_sort_key)
         self.t1 = t1
         self.t2 = t2
         exclude_types = tuple(exclude_types) if exclude_types else None
@@ -68,6 +75,10 @@ class DeepDiff(dict):
         self._native = _native.DeepDiff(
             t1, t2, ignore_order=ignore_order, max_depth=max_depth, exclude_types=exclude_types,
             ignore_private_variables=ignore_private_variables, skip=skip, use_enum_value=use_enum_value,
+            threshold_to_diff_deeper=float(threshold_to_diff_deeper or 0),
+            cutoff_distance_for_pairs=float(cutoff_distance_for_pairs),
+            cutoff_intersection_for_pairs=float(cutoff_intersection_for_pairs),
+            zip_ordered_iterables=zip_ordered_iterables, get_deep_distance=get_deep_distance,
             **native_options(
                 _BUILTIN_TYPES, significant_digits=significant_digits,
                 number_format_notation=number_format_notation, math_epsilon=math_epsilon,
@@ -91,6 +102,8 @@ class DeepDiff(dict):
             for change in report["type_changes"].values():
                 for key in ("old_type", "new_type"):
                     change[key] = classes.get(change[key], change[key])
+        if self._native.deep_distance is not None:
+            report["deep_distance"] = self._native.deep_distance
         return report
 
     def to_json(self, default_mapping=None, force_use_builtin_json=False, verbose_level=None, **kwargs):
@@ -98,12 +111,16 @@ class DeepDiff(dict):
         if default_mapping is not None:
             raise NotImplementedError("default_mapping is not supported yet.")
         text = self._native.to_json(self._level(verbose_level))
+        if self._native.deep_distance is not None:
+            report = json.loads(text)
+            report["deep_distance"] = self._native.deep_distance
+            return json.dumps(report, **kwargs)
         return json.dumps(json.loads(text), **kwargs) if kwargs else text
 
     @property
     def affected_paths(self):
         """The paths of every difference in this result."""
-        return {path for findings in self.values() for path in findings}
+        return {path for key, findings in self.items() if key != "deep_distance" for path in findings}
 
     @property
     def affected_root_keys(self):

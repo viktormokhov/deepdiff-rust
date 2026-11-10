@@ -49,6 +49,12 @@ pub struct DiffOptions {
     pub type_groups: Option<Arc<HashMap<Box<str>, u64>>>,
     /// `use_enum_value`: an `Enum` member compares as its `value` against anything else.
     pub use_enum_value: bool,
+    pub threshold_to_diff_deeper: f64,
+    pub cutoff_distance_for_pairs: f64,
+    pub cutoff_intersection_for_pairs: f64,
+    pub zip_ordered_iterables: bool,
+    /// `get_deep_distance`: the adapter reports [`Report::deep_distance`](crate::Report::deep_distance).
+    pub get_deep_distance: bool,
 }
 
 impl Default for DiffOptions {
@@ -65,6 +71,11 @@ impl Default for DiffOptions {
             ignore_numeric_type_changes: false,
             type_groups: None,
             use_enum_value: false,
+            threshold_to_diff_deeper: crate::ignore_order::THRESHOLD_TO_DIFF_DEEPER,
+            cutoff_distance_for_pairs: crate::ignore_order::CUTOFF_DISTANCE_FOR_PAIRS,
+            cutoff_intersection_for_pairs: crate::ignore_order::CUTOFF_INTERSECTION_FOR_PAIRS,
+            zip_ordered_iterables: false,
+            get_deep_distance: false,
         }
     }
 }
