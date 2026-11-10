@@ -11,7 +11,7 @@ use crate::convert::{
 };
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
-#[pyclass(module = "deepdiff")]
+#[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,
     report_is_deep: bool,
