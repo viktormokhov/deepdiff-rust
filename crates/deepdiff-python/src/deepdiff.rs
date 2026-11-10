@@ -44,7 +44,7 @@ pub(crate) struct DeepDiff {
 #[pymethods]
 impl DeepDiff {
     #[new]
-    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None, exclude_types=None, ignore_private_variables=true, skip=None, significant_digits=None, exponent_notation=false, math_epsilon=None, log_scale_threshold=None, ignore_nan_inequality=false, ignore_string_case=false, ignore_numeric_type_changes=false, type_groups=None, group_mask=None, truncate_datetime=None, use_enum_value=false, threshold_to_diff_deeper=0.33, cutoff_distance_for_pairs=0.3, cutoff_intersection_for_pairs=0.7, zip_ordered_iterables=false, get_deep_distance=false))]
+    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None, exclude_types=None, ignore_private_variables=true, skip=None, significant_digits=None, exponent_notation=false, math_epsilon=None, log_scale_threshold=None, ignore_nan_inequality=false, ignore_string_case=false, ignore_numeric_type_changes=false, type_groups=None, group_mask=None, truncate_datetime=None, use_enum_value=false, threshold_to_diff_deeper=0.33, cutoff_distance_for_pairs=0.3, cutoff_intersection_for_pairs=0.7, zip_ordered_iterables=false, get_deep_distance=false, report_repetition=false))]
     #[allow(clippy::too_many_arguments)] // mirrors the Python keyword signature
     fn new(
         py: Python<'_>,
@@ -71,6 +71,7 @@ impl DeepDiff {
         cutoff_intersection_for_pairs: f64,
         zip_ordered_iterables: bool,
         get_deep_distance: bool,
+        report_repetition: bool,
     ) -> PyResult<Self> {
         let mut opts = DiffOptions {
             significant_digits,
@@ -86,6 +87,7 @@ impl DeepDiff {
             cutoff_intersection_for_pairs,
             zip_ordered_iterables,
             get_deep_distance,
+            report_repetition,
             ..resolve_options(max_depth, ignore_order)?
         };
         let mut held = Held::new(opts.max_depth);

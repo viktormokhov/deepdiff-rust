@@ -169,6 +169,9 @@ pub(crate) enum ItemKey {
     Rounded(Option<&'static str>, Box<str>),
     /// A `bytes`, `Decimal` (by `str()`, as `DeepHash` digests it), `UUID` or `complex`.
     Leaf(LeafKey),
+    /// A list or tuple member under `report_repetition`, with its count (`DeepHash`'s
+    /// `hash|count`), so `[1, 1]` and `[1]` key apart.
+    Counted(Box<ItemKey>, usize),
 }
 
 /// [`ItemKey::Leaf`]'s payload.
@@ -209,6 +212,10 @@ impl std::hash::Hash for ItemKey {
                 map.hash(state);
             }
             Self::Leaf(key) => key.hash(state),
+            Self::Counted(key, count) => {
+                key.hash(state);
+                count.hash(state);
+            }
         }
     }
 }
@@ -598,7 +605,7 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
         Value::Number(n) => (leaf_number_key(n, memo.norm), part()),
         Value::Leaf(leaf) => (leaf_key(leaf, memo.norm), part()),
         Value::Array(items) => (
-            ItemKey::List(items.iter().map(|i| item_key(i, memo)).collect()),
+            ItemKey::List(members(items.iter().map(|i| item_key(i, memo)), memo.norm)),
             None,
         ),
         Value::Tuple(items) => tuple_keyed(items, memo),
@@ -651,19 +658,20 @@ fn object_key_item_key(key: &crate::value::ObjectKey, memo: &IgnoreOrderMemo) ->
 /// [`keyed`]'s tuple case: keys elements bottom-up, then takes the key from the digest cache (an
 /// earlier Python-equal tuple's wins), or keeps the content key if any element is unhashable.
 fn tuple_keyed(items: &[Value], memo: &IgnoreOrderMemo) -> (ItemKey, Option<PyHashPart>) {
-    let mut children = BTreeSet::new();
+    let mut children = Vec::with_capacity(items.len());
     let mut parts = Vec::with_capacity(items.len());
     let mut hashable = true;
 
     for item in items {
         let (child_key, child_part) = keyed(item, memo, hashable);
-        children.insert(child_key);
+        children.push(child_key);
         match child_part {
             Some(child_part) => parts.push(child_part),
             None => hashable = false,
         }
     }
 
+    let children = members(children.into_iter(), memo.norm);
     if !hashable {
         return (ItemKey::Tuple(Rc::new(children)), None);
     }
@@ -672,6 +680,20 @@ fn tuple_keyed(items: &[Value], memo: &IgnoreOrderMemo) -> (ItemKey, Option<PyHa
         ItemKey::Tuple(Rc::new(children))
     });
     (digest, Some(PyHashPart::Tuple(id)))
+}
+/// A list's or tuple's member keys: a set, or each with its count under `report_repetition`.
+fn members(keys: impl Iterator<Item = ItemKey>, norm: HashNorm) -> BTreeSet<ItemKey> {
+    if !norm.report_repetition {
+        return keys.collect();
+    }
+    let mut counts: BTreeMap<ItemKey, usize> = BTreeMap::new();
+    for key in keys {
+        *counts.entry(key).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(key, count)| ItemKey::Counted(Box::new(key), count))
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -684,6 +706,8 @@ pub(crate) struct HashedList<'a> {
     /// Distinct keys in first-occurrence order, shared by [`Rc`] with [`Self::info`].
     pub(crate) distinct_order: Vec<Rc<ItemKey>>,
     info: HashMap<Rc<ItemKey>, (usize, &'a Value)>,
+    /// Every index of each key, filled only under `report_repetition`.
+    indexes: HashMap<Rc<ItemKey>, Vec<usize>>,
 }
 
 impl<'a> HashedList<'a> {
@@ -692,10 +716,13 @@ impl<'a> HashedList<'a> {
     pub(crate) fn build(items: &'a [Value], memo: &IgnoreOrderMemo) -> Self {
         let mut distinct_order = Vec::new();
         let mut info: HashMap<Rc<ItemKey>, (usize, &'a Value)> = HashMap::default();
+        let mut indexes: HashMap<Rc<ItemKey>, Vec<usize>> = HashMap::default();
 
         for (idx, item) in items.iter().enumerate() {
             let key = Rc::new(item_key(item, memo));
-
+            if memo.norm.report_repetition {
+                indexes.entry(Rc::clone(&key)).or_default().push(idx);
+            }
             if let std::collections::hash_map::Entry::Vacant(entry) = info.entry(Rc::clone(&key)) {
                 distinct_order.push(key);
                 entry.insert((idx, item));
@@ -705,6 +732,7 @@ impl<'a> HashedList<'a> {
         Self {
             distinct_order,
             info,
+            indexes,
         }
     }
 
@@ -719,5 +747,10 @@ impl<'a> HashedList<'a> {
     /// Panics if `key` is not in this list's table.
     pub(crate) fn get(&self, key: &ItemKey) -> (usize, &'a Value) {
         self.info[key]
+    }
+
+    /// Every index of `key`, under `report_repetition` only.
+    pub(crate) fn indexes(&self, key: &ItemKey) -> &[usize] {
+        &self.indexes[key]
     }
 }

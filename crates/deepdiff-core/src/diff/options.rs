@@ -55,6 +55,8 @@ pub struct DiffOptions {
     pub zip_ordered_iterables: bool,
     /// `get_deep_distance`: the adapter reports [`Report::deep_distance`](crate::Report::deep_distance).
     pub get_deep_distance: bool,
+    /// `report_repetition`: under `ignore_order`, count repeats and report `repetition_change`.
+    pub report_repetition: bool,
 }
 
 impl Default for DiffOptions {
@@ -76,6 +78,7 @@ impl Default for DiffOptions {
             cutoff_intersection_for_pairs: crate::ignore_order::CUTOFF_INTERSECTION_FOR_PAIRS,
             zip_ordered_iterables: false,
             get_deep_distance: false,
+            report_repetition: false,
         }
     }
 }
@@ -206,12 +209,25 @@ pub fn diff_with_resolver<'r>(
     opts: &DiffOptions,
     resolver: &'r mut Resolver<'r>,
 ) -> Result<Report, Error> {
-    diff_with_options_memo(
-        a,
-        b,
-        opts,
-        &crate::ignore_order::IgnoreOrderMemo::with_resolver(resolver).normalized(opts),
-    )
+    let mut report = diff_with_resolver_unmerged(a, b, opts, resolver)?;
+    report.finish(opts);
+    Ok(report)
+}
+
+/// [`diff_with_resolver`] before [`Report::finish`], so a caller can filter it and measure
+/// [`Report::deep_distance`] first, in `DeepDiff`'s order.
+///
+/// # Errors
+///
+/// Same as [`diff_with_options`].
+pub fn diff_with_resolver_unmerged<'r>(
+    a: &Value,
+    b: &Value,
+    opts: &DiffOptions,
+    resolver: &'r mut Resolver<'r>,
+) -> Result<Report, Error> {
+    let memo = crate::ignore_order::IgnoreOrderMemo::with_resolver(resolver).normalized(opts);
+    diff_unmerged(a, b, opts, &memo)
 }
 
 /// The body of [`diff_with_options`], taking an explicit
@@ -222,14 +238,22 @@ pub(crate) fn diff_with_options_memo(
     opts: &DiffOptions,
     memo: &crate::ignore_order::IgnoreOrderMemo,
 ) -> Result<Report, Error> {
+    let mut report = diff_unmerged(a, b, opts, memo)?;
+    report.finish(opts);
+    Ok(report)
+}
+
+/// [`diff_with_options_memo`] before [`Report::finish`].
+fn diff_unmerged(
+    a: &Value,
+    b: &Value,
+    opts: &DiffOptions,
+    memo: &crate::ignore_order::IgnoreOrderMemo,
+) -> Result<Report, Error> {
     if values_equal(a, b) {
         return Ok(Report::new());
     }
-    let mut path = Vec::new();
-    diff_at(&mut path, a, b, 0, opts, memo).map(|mut report| {
-        report.merge_mutual_add_removes();
-        report
-    })
+    diff_at(&mut Vec::new(), a, b, 0, opts, memo)
 }
 /// Diffs like [`diff()`] with a caller-chosen recursion-depth bound; path
 /// depth plus finding-value depth share it. See `docs/design/depth-budget.md`,

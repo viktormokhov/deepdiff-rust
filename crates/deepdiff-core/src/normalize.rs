@@ -141,6 +141,7 @@ pub(crate) struct HashNorm {
     pub(crate) ignore_numeric_type_changes: bool,
     pub(crate) ignore_string_case: bool,
     pub(crate) use_enum_value: bool,
+    pub(crate) report_repetition: bool,
 }
 
 impl HashNorm {
@@ -151,6 +152,7 @@ impl HashNorm {
             ignore_numeric_type_changes: opts.ignore_numeric_type_changes,
             ignore_string_case: opts.ignore_string_case,
             use_enum_value: opts.use_enum_value,
+            report_repetition: opts.report_repetition,
         }
     }
 }

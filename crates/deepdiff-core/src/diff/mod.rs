@@ -16,7 +16,7 @@ mod tests;
 
 pub use options::{
     DEFAULT_MAX_DEPTH, DiffOptions, Resolution, Resolver, diff, diff_with_max_depth,
-    diff_with_options, diff_with_resolver,
+    diff_with_options, diff_with_resolver, diff_with_resolver_unmerged,
 };
 
 pub(crate) use array::array_diff;

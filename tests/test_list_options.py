@@ -70,3 +70,32 @@ def test_cutoff_distance_out_of_range_raises_like_deepdiff() -> None:
 def test_group_by_rewrites_t1_and_t2() -> None:
     diff = DeepDiff(PEOPLE1, PEOPLE2, group_by="id")
     assert diff.t1 == RealDeepDiff(PEOPLE1, PEOPLE2, group_by="id").t1
+
+
+REPEATS = [
+    ([1, 2, 1], [1, 2]),
+    ([1, 1, 3], [3, 4, 4, 1]),
+    ([[1, 1], 2], [[1], 2]),
+    ([{"a": 1}, {"a": 1}], [{"a": 2}]),
+    ([1], [1, 1, 1]),
+    ((1, 1, 2), (1, 2)),
+    ([[1, 2], [1, 2]], [[1, 2], [1, 3]]),
+    ([1, 2, 3], [3, 2, 1]),
+    (["a", "b", "a"], ["b", "c"]),
+    ({"k": [1, 1, 2]}, {"k": [2, 2, 1]}),
+]
+REP = {"ignore_order": True, "report_repetition": True}
+
+
+@pytest.mark.parametrize("verbose_level", [0, 1, 2])
+@pytest.mark.parametrize(("t1", "t2"), REPEATS)
+def test_report_repetition_matches_deepdiff(t1, t2, verbose_level) -> None:
+    kwargs = {**REP, "verbose_level": verbose_level}
+    assert DeepDiff(t1, t2, **kwargs) == RealDeepDiff(t1, t2, **kwargs)
+    kwargs["get_deep_distance"] = True
+    assert DeepDiff(t1, t2, **kwargs) == RealDeepDiff(t1, t2, **kwargs)
+
+
+def test_report_repetition_json_matches_deepdiff() -> None:
+    a, b = [1, 2, 1], [1, 2]
+    assert json.loads(DeepDiff(a, b, **REP).to_json()) == json.loads(RealDeepDiff(a, b, **REP).to_json())

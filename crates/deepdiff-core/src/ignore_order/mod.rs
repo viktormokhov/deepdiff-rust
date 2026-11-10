@@ -61,12 +61,7 @@ pub(crate) fn ignore_order_array_diff(
     // "Depth safety" section. Checked at each side's own eventual path (its
     // own original index) so a MaxDepthExceeded error points at exactly the
     // item that tripped it.
-    for (idx, item) in a.iter().enumerate() {
-        scoped(path, PathSegment::Index(idx), |path| {
-            check_value_depth(path, item, depth + 1, opts.max_depth)
-        })?;
-    }
-    for (idx, item) in b.iter().enumerate() {
+    for (idx, item) in a.iter().enumerate().chain(b.iter().enumerate()) {
         scoped(path, PathSegment::Index(idx), |path| {
             check_value_depth(path, item, depth + 1, opts.max_depth)
         })?;
@@ -109,6 +104,9 @@ pub(crate) fn ignore_order_array_diff(
 
     let mut report = Report::new();
     let mut consumed_removed: HashSet<Rc<ItemKey>> = HashSet::default();
+    // Under `report_repetition` every index of a key is reported, and a repeated new item
+    // carries no `new_path`, as `DeepDiff` reports it.
+    let rep = opts.report_repetition;
 
     for added_key in &hashes_added {
         let (new_idx, new_value) = t2.get(added_key);
@@ -116,22 +114,41 @@ pub(crate) fn ignore_order_array_diff(
         if let Some(removed_key) = pairs.get(added_key) {
             consumed_removed.insert(Rc::clone(removed_key));
             let (old_idx, old_value) = t1.get(removed_key);
-            let prefix_depth = path.len();
-            let sub_report = scoped(path, PathSegment::Index(old_idx), |path| {
-                let mut sub = diff_at(path, old_value, new_value, depth, opts, memo)?;
-                // Merges this pair's own add/remove collision before
-                // retagging; independent of the whole-tree merge pass.
-                sub.merge_mutual_add_removes();
-                if old_idx != new_idx {
-                    sub.retag_new_path(prefix_depth, new_idx);
-                }
-                Ok::<Report, Error>(sub)
-            })?;
-            report.merge(sub_report);
+            let (old_indexes, new_idx) = if rep {
+                let single = t2.indexes(added_key).len() == 1;
+                (t1.indexes(removed_key), single.then_some(new_idx))
+            } else {
+                (std::slice::from_ref(&old_idx), Some(new_idx))
+            };
+            for &old_idx in old_indexes {
+                let prefix_depth = path.len();
+                let sub_report = scoped(path, PathSegment::Index(old_idx), |path| {
+                    let mut sub = diff_at(path, old_value, new_value, depth, opts, memo)?;
+                    // Merges this pair's own add/remove collision before
+                    // retagging; independent of the whole-tree merge pass.
+                    if !rep {
+                        sub.merge_mutual_add_removes();
+                    }
+                    if let Some(new_idx) = new_idx
+                        && old_idx != new_idx
+                    {
+                        sub.retag_new_path(prefix_depth, new_idx);
+                    }
+                    Ok::<Report, Error>(sub)
+                })?;
+                report.merge(sub_report);
+            }
         } else {
-            scoped(path, PathSegment::Index(new_idx), |path| {
-                report.insert_iterable_item_added(path.clone(), new_value.clone());
-            });
+            let new_indexes = if rep {
+                t2.indexes(added_key)
+            } else {
+                std::slice::from_ref(&new_idx)
+            };
+            for &new_idx in new_indexes {
+                scoped(path, PathSegment::Index(new_idx), |path| {
+                    report.insert_iterable_item_added(path.clone(), new_value.clone());
+                });
+            }
         }
     }
 
@@ -140,10 +157,40 @@ pub(crate) fn ignore_order_array_diff(
             continue;
         }
         let (old_idx, old_value) = t1.get(removed_key);
-        scoped(path, PathSegment::Index(old_idx), |path| {
-            report.insert_iterable_item_removed(path.clone(), old_value.clone());
-        });
+        let old_indexes = if rep {
+            t1.indexes(removed_key)
+        } else {
+            std::slice::from_ref(&old_idx)
+        };
+        for &old_idx in old_indexes {
+            scoped(path, PathSegment::Index(old_idx), |path| {
+                report.insert_iterable_item_removed(path.clone(), old_value.clone());
+            });
+        }
+    }
+
+    if rep {
+        report_repetition_changes(path, &t1, &t2, &mut report);
     }
 
     Ok(report)
+}
+
+/// `report_repetition`'s `repetition_change` for each item the two lists hold a different
+/// number of times.
+fn report_repetition_changes(
+    path: &mut Vec<PathSegment>,
+    t1: &HashedList<'_>,
+    t2: &HashedList<'_>,
+    report: &mut Report,
+) {
+    for key in t1.distinct_order.iter().filter(|key| t2.contains(key)) {
+        let (old_indexes, new_indexes) = (t1.indexes(key), t2.indexes(key));
+        if old_indexes.len() != new_indexes.len() {
+            let value = t1.get(key).1.clone();
+            scoped(path, PathSegment::Index(old_indexes[0]), |path| {
+                report.insert_repetition_change(path.clone(), old_indexes, new_indexes, value);
+            });
+        }
+    }
 }

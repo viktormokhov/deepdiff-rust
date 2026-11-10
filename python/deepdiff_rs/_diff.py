@@ -60,7 +60,7 @@ class DeepDiff(dict):
         truncate_datetime=None, ignore_uuid_types=False, use_enum_value=False,
         threshold_to_diff_deeper=0.33, cutoff_distance_for_pairs=0.3,
         cutoff_intersection_for_pairs=0.7, zip_ordered_iterables=False, get_deep_distance=False,
-        group_by=None, group_by_sort_key=None,
+        group_by=None, group_by_sort_key=None, report_repetition=False,
     ):
         if view != "text":
             raise NotImplementedError(f"view={view!r} is not supported yet; only view='text' is.")
@@ -79,6 +79,7 @@ class DeepDiff(dict):
             cutoff_distance_for_pairs=float(cutoff_distance_for_pairs),
             cutoff_intersection_for_pairs=float(cutoff_intersection_for_pairs),
             zip_ordered_iterables=zip_ordered_iterables, get_deep_distance=get_deep_distance,
+            report_repetition=report_repetition,
             **native_options(
                 _BUILTIN_TYPES, significant_digits=significant_digits,
                 number_format_notation=number_format_notation, math_epsilon=math_epsilon,

@@ -781,8 +781,15 @@ pub(crate) fn count_array_diff_leaves(
     match crate::diff::array_diff(&mut Vec::new(), a, b, depth, opts, memo) {
         Ok(mut sub_report) => {
             // Runs before `diff_length` is measured; a no-op on the positional path.
-            sub_report.merge_mutual_add_removes();
-            Ok(sub_report.distance_leaf_length())
+            if !opts.report_repetition {
+                sub_report.merge_mutual_add_removes();
+            }
+            let repeated = if opts.report_repetition {
+                sub_report.repeated_items_length()
+            } else {
+                0
+            };
+            Ok(sub_report.distance_leaf_length() - repeated)
         }
         Err(error) => Err(Box::new(error)),
     }

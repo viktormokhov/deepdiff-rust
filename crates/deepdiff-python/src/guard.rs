@@ -111,13 +111,14 @@ pub(crate) fn diff_to_value<'r>(
     let mut resolver = Some(resolver);
     let mut diff = move || {
         let resolver = resolver.take().expect("the diff runs once");
-        deepdiff_core::diff::diff_with_resolver(a, b, opts, resolver).map(|mut report| {
+        deepdiff_core::diff::diff_with_resolver_unmerged(a, b, opts, resolver).map(|mut report| {
             if let Some(keep) = keep {
                 report.retain(keep);
             }
             let distance = opts
                 .get_deep_distance
                 .then(|| report.deep_distance(a, b, opts));
+            report.finish(opts);
             (report.to_value(), distance)
         })
     };

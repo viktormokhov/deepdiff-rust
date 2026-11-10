@@ -122,6 +122,28 @@ impl TypeChangeEntry {
 
 /// A structural path rendered into the string [`Value`] a report entry
 /// carries it as (`new_path`).
+/// A `repetition_change` entry in `DeepDiff`'s shape.
+fn repetition_entry(old_indexes: &[usize], new_indexes: &[usize], value: Value) -> Value {
+    let int = |n: usize| Value::Number(crate::Number::from_u64(n as u64));
+    let list = |indexes: &[usize]| {
+        Value::Array(
+            indexes
+                .iter()
+                .map(|&i| int(i))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+                .into(),
+        )
+    };
+    Builder::new().object(vec![
+        ("old_repeat", int(old_indexes.len())),
+        ("new_repeat", int(new_indexes.len())),
+        ("old_indexes", list(old_indexes)),
+        ("new_indexes", list(new_indexes)),
+        ("value", value),
+    ])
+}
+
 fn rendered(path: &[PathSegment]) -> Value {
     Value::Str(render_path(path))
 }
@@ -146,6 +168,18 @@ pub struct Report {
     /// The two attribute categories, boxed for the same frame-budget reason as
     /// [`Self::set_items`].
     attribute_items: Option<Box<AttributeCategories>>,
+    /// The rarely used parts, boxed for the same frame-budget reason as [`Self::set_items`].
+    extras: Option<Box<Extras>>,
+}
+
+/// [`Report`]'s rarely used parts, behind one pointer.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Extras {
+    /// `report_repetition`'s findings, each entry already in its reported shape.
+    repetition_change: BTreeMap<Vec<PathSegment>, Value>,
+    /// The removed side's leaf length [`Report::merge_mutual_add_removes`] folded into
+    /// `values_changed`, which `DeepDiff` still counts in `deep_distance`.
+    merged_length: usize,
 }
 
 /// [`Report`]'s two set categories, behind one pointer.
@@ -174,6 +208,12 @@ impl Report {
     /// The two set categories, or an empty pair when no set finding exists.
     fn set_items(&self) -> &SetCategories {
         self.set_items.as_deref().unwrap_or(&NO_SET_ITEMS)
+    }
+
+    /// The `repetition_change` findings, or an empty map.
+    fn repetitions(&self) -> &BTreeMap<Vec<PathSegment>, Value> {
+        static NONE: BTreeMap<Vec<PathSegment>, Value> = BTreeMap::new();
+        self.extras.as_ref().map_or(&NONE, |e| &e.repetition_change)
     }
 
     /// The two attribute categories, or an empty pair when no attribute
@@ -318,6 +358,23 @@ impl Report {
             attributes.added.retain(|path, _| keep(path));
             attributes.removed.retain(|path, _| keep(path));
         }
+        if let Some(extras) = &mut self.extras {
+            extras.repetition_change.retain(|path, _| keep(path));
+        }
+    }
+
+    /// Records a `repetition_change`: `value` sits at `old_indexes` in the old list and at
+    /// `new_indexes` in the new one.
+    pub(crate) fn insert_repetition_change(
+        &mut self,
+        path: Vec<PathSegment>,
+        old_indexes: &[usize],
+        new_indexes: &[usize],
+        value: Value,
+    ) {
+        let entry = repetition_entry(old_indexes, new_indexes, value);
+        let extras = self.extras.get_or_insert_default();
+        insert_checked(&mut extras.repetition_change, path, entry);
     }
 
     /// Records a `type_changes` finding at the structural `path`.
@@ -434,6 +491,19 @@ impl Report {
             merge_map(&mut own.added, attribute_items.added);
             merge_map(&mut own.removed, attribute_items.removed);
         }
+        if let Some(extras) = other.extras {
+            let own = self.extras.get_or_insert_default();
+            own.merged_length += extras.merged_length;
+            merge_map(&mut own.repetition_change, extras.repetition_change);
+        }
+    }
+
+    /// The whole-tree passes `DeepDiff` runs when it renders a result: the mutual add/remove
+    /// merge, skipped under `report_repetition`.
+    pub fn finish(&mut self, opts: &crate::DiffOptions) {
+        if !opts.report_repetition {
+            self.merge_mutual_add_removes();
+        }
     }
 
     /// `DeepDiff`'s mutual add/remove pass: an `iterable_item_added`/`removed` pair
@@ -465,6 +535,8 @@ impl Report {
                 .iterable_item_removed
                 .remove(&removed_path)
                 .expect("removed_path was just read from removed_by_rendered, built from this map");
+            self.extras.get_or_insert_default().merged_length +=
+                crate::ignore_order::item_length(&old_value);
             self.insert_values_changed(
                 removed_path,
                 ValuesChangedEntry {
@@ -494,7 +566,14 @@ impl Report {
     /// diffs: `_get_rough_distance` over the finished report.
     #[must_use]
     pub fn deep_distance(&self, a: &Value, b: &Value, opts: &crate::DiffOptions) -> f64 {
-        crate::ignore_order::deep_distance(a, b, self.distance_leaf_length(), opts)
+        let repeated = if opts.report_repetition {
+            self.repeated_items_length()
+        } else {
+            0
+        };
+        let merged = self.extras.as_ref().map_or(0, |e| e.merged_length);
+        let length = self.distance_leaf_length() + merged - repeated;
+        crate::ignore_order::deep_distance(a, b, length, opts)
     }
 
     /// `DeepDiff`'s `_get_item_length` over a trial-diff report, the
@@ -528,7 +607,37 @@ impl Report {
             .map(crate::ignore_order::item_length)
             .sum();
 
-        values_changed + type_changes + added_removed
+        // ponytail: one `value` per entry, as `_get_item_length` dedups the delta's repeats by `id`.
+        let repetitions: usize = self
+            .repetitions()
+            .values()
+            .filter_map(|entry| match entry {
+                Value::Object(fields) => fields.iter().find(|(k, _)| k.as_str() == Some("value")),
+                _ => None,
+            })
+            .map(|(_, value)| crate::ignore_order::item_length(value))
+            .sum();
+
+        values_changed + type_changes + added_removed + repetitions
+    }
+
+    /// Under `report_repetition`, the leaf length of each iterable item reported again at
+    /// another index of the same list, which `_get_item_length` counts once (one object).
+    pub(crate) fn repeated_items_length(&self) -> usize {
+        let mut total = 0;
+        for map in [&self.iterable_item_added, &self.iterable_item_removed] {
+            // ponytail: O(n^2) scan per list; group by parent if long repeat lists matter.
+            let mut seen: Vec<(&[PathSegment], &Value)> = Vec::new();
+            for (path, value) in map {
+                let parent = &path[..path.len() - 1];
+                if seen.iter().any(|&(p, v)| p == parent && v == value) {
+                    total += crate::ignore_order::item_length(value);
+                } else {
+                    seen.push((parent, value));
+                }
+            }
+        }
+        total
     }
 
     /// Returns `true` if no differences were found in any category.
@@ -544,6 +653,7 @@ impl Report {
             && self.set_items().removed.is_empty()
             && self.attribute_items().added.is_empty()
             && self.attribute_items().removed.is_empty()
+            && self.repetitions().is_empty()
     }
 
     /// The total number of findings across every category, as `DeepDiff`'s
@@ -561,6 +671,7 @@ impl Report {
             + self.set_items().removed.len()
             + self.attribute_items().added.len()
             + self.attribute_items().removed.len()
+            + self.repetitions().len()
     }
 
     /// Renders the report in `DeepDiff`'s `to_json()` shape as a [`Value`], keeping
@@ -627,6 +738,12 @@ impl Report {
             "attribute_removed",
             &self.attribute_items().removed,
         );
+        push_raw_category(
+            &mut root,
+            &mut builder,
+            "repetition_change",
+            self.repetitions(),
+        );
 
         builder.object(root)
     }
@@ -679,6 +796,7 @@ impl Report {
         serialize_set_category(&mut root, "set_item_added", &self.set_items().added);
         serialize_set_category(&mut root, "set_item_removed", &self.set_items().removed);
         serialize_raw_category(&mut root, "attribute_added", &self.attribute_items().added);
+        serialize_raw_category(&mut root, "repetition_change", self.repetitions());
         serialize_raw_category(
             &mut root,
             "attribute_removed",
