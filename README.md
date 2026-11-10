@@ -21,19 +21,17 @@ maturin develop --release
 python -m pytest
 ```
 
-The package currently exposes the familiar import path:
+The package exposes a separate import namespace so it can coexist with the reference DeepDiff package for differential testing:
 
 ```python
-from deepdiff import DeepDiff
+from deepdiff_rs import DeepDiff
 
 diff = DeepDiff({"a": 1}, {"a": 2})
 print(diff.to_dict())
 print(diff.to_json())
 ```
 
-**Important:** uninstall the original `deepdiff` distribution before installing
-this project, because both distributions provide the top-level `deepdiff`
-Python package. The project distribution is named `deepdiff-rust`.
+The project distribution is named `deepdiff-rust`; its import package is `deepdiff_rs`. This lets the original `deepdiff` package remain installed as a differential-test oracle. A separate import-compatibility shim can be considered later, but should not shadow the reference package in the same environment.
 
 ## Architecture
 
