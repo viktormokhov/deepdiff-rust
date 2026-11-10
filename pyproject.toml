@@ -1,13 +1,15 @@
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "deepdiff-rust"
 version = "0.1.0"
-description = "A Rust-powered structural diff engine with Python bindings"
+description = "A Rust-backed DeepDiff-compatible implementation"
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+keywords = ["deepdiff", "diff", "rust", "performance"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: 3",
@@ -15,12 +17,19 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "deepdiff==9.1.0",
 ]
 
 [tool.maturin]
 manifest-path = "crates/deepdiff-python/Cargo.toml"
 python-source = "python"
-module-name = "deepdiff_rust._native"
+module-name = "deepdiff._native"
 features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
