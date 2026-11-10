@@ -1,0 +1,30 @@
+"""One guard on the suite itself: no test name may be defined twice.
+
+Python's later definition silently shadows the earlier one, so a duplicate
+deletes a test without failing.
+"""
+
+import ast
+from collections import Counter
+from pathlib import Path
+
+TESTS_ROOT = Path(__file__).resolve().parent
+
+
+def test_no_test_name_is_defined_twice() -> None:
+    """Every test in every module of this suite has a name of its own."""
+    duplicates = {}
+
+    for path in sorted(TESTS_ROOT.glob("test_*.py")):
+        counts = Counter(
+            node.name
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+        )
+
+        found = sorted(name for name, count in counts.items() if count > 1)
+
+        if found:
+            duplicates[path.name] = found
+
+    assert not duplicates, f"shadowed test definitions: {duplicates}"

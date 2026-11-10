@@ -1,6 +1,6 @@
 # ADR 0001: Use Onix as the initial Rust diff engine
 
-- Status: Accepted for evaluation
+- Status: Superseded by [ADR 0002](adr-0002-fork-onix.md)
 - Date: 2026-11-10
 - Upstream: https://github.com/ksco92/onix
 - Pinned revision: 85956c7f3c39d4e39697815714e92a21c0c74ce4

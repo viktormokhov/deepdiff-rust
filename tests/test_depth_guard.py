@@ -1,0 +1,659 @@
+"""Depth-guard tests: adversarially deep input must raise cleanly, never crash.
+
+Every fixture here is built iteratively (a `for` loop wrapping a leaf in a
+new single-item list, never Python-side recursion) so building the fixture
+itself never hits Python's own recursion limit.
+"""
+
+import json
+import statistics
+import subprocess
+import sys
+import textwrap
+import time
+from typing import Union
+
+import pytest
+
+from deepdiff_rs import MAX_DEPTH_CEILING, DeepDiff, MaxDepthError, diff_json
+
+JsonValue = Union[dict[str, "JsonValue"], list["JsonValue"], str, int, float, bool, None]
+
+# onix_core::DEFAULT_MAX_DEPTH -- see crates/onix-core/src/diff/options.rs.
+DEFAULT_MAX_DEPTH = 512
+
+
+def _run_isolated(body: str) -> subprocess.CompletedProcess[str]:
+    """
+    Run `body` in an isolated subprocess so a SIGSEGV-class crash is a failed
+    assertion, not a dead test run.
+
+    :param body: Python source to run; it should assert its own expectations
+        and exit 0 on success.
+    :return: The completed subprocess (inspect ``returncode``/``stderr``).
+    """
+    src = "from deepdiff_rs import DeepDiff, MaxDepthError, diff_json\n" + textwrap.dedent(body)
+    return subprocess.run(
+        [sys.executable, "-c", src],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def _nested_list(depth: int, leaf: JsonValue) -> JsonValue:
+    """
+    Build a list nested `depth` levels deep around `leaf`, iteratively.
+
+    :param depth: How many list layers to wrap `leaf` in.
+    :param leaf: The innermost value.
+    :return: `leaf` wrapped in `depth` single-item lists.
+    """
+    value = leaf
+
+    for _ in range(depth):
+        value = [value]
+
+    return value
+
+
+def _nested_tuple(depth: int, leaf: JsonValue) -> JsonValue:
+    """
+    Build a tuple nested `depth` levels deep around `leaf`, iteratively.
+
+    :param depth: How many tuple layers to wrap `leaf` in.
+    :param leaf: The innermost value.
+    :return: `leaf` wrapped in `depth` single-item tuples.
+    """
+    value = leaf
+
+    for _ in range(depth):
+        value = (value,)
+
+    return value
+
+
+def test_deep_unequal_input_raises_max_depth_error_not_a_crash() -> None:
+    """An adversarially deep, unequal pair raises MaxDepthError, never crashes."""
+    a = _nested_list(100_000, leaf=1)
+    b = _nested_list(100_000, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b)
+
+
+def test_input_deeper_than_max_depth_raises_at_conversion_time() -> None:
+    """Input nested past a raised (but in-ceiling) max_depth raises MaxDepthError at conversion."""
+    max_depth = 15_000
+    a = _nested_list(max_depth + 5_000, leaf=1)
+    b = _nested_list(max_depth + 5_000, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b, max_depth=max_depth)
+
+
+def test_deep_tuple_nesting_raises_max_depth_error_not_a_crash() -> None:
+    """Tuples nest through the same conversion walk as lists, so the guard covers them."""
+    a = _nested_tuple(DEFAULT_MAX_DEPTH + 1_000, leaf=1)
+    b = _nested_tuple(DEFAULT_MAX_DEPTH + 1_000, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b)
+
+
+def test_deep_tuple_nesting_past_a_raised_max_depth_raises_at_conversion_time() -> None:
+    """A tuple nest past a raised (ceiling-level) max_depth still raises rather than crashing."""
+    a = _nested_tuple(MAX_DEPTH_CEILING + 1_000, leaf=1)
+    b = _nested_tuple(MAX_DEPTH_CEILING + 1_000, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b, max_depth=MAX_DEPTH_CEILING)
+
+
+def test_max_depth_error_is_a_value_error_subclass() -> None:
+    """MaxDepthError is catchable by callers that only expect ValueError."""
+    a = _nested_list(1000, leaf=1)
+    b = _nested_list(1000, leaf=2)
+
+    with pytest.raises(ValueError):
+        DeepDiff(a, b)
+
+
+def test_deep_equal_input_also_raises_at_conversion_time() -> None:
+    """Equal deep inputs still raise: conversion is bounded by `max_depth` before
+    equality is known (`docs/design/depth-budget.md`, "Equal inputs of any depth").
+    """
+    value = _nested_list(100_000, leaf=1)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(value, value)
+
+
+def test_max_depth_boundary_accepts_exactly_and_rejects_one_more() -> None:
+    """Nesting of exactly `max_depth` succeeds; one level deeper raises."""
+    max_depth = 20
+    a_at_bound = _nested_list(max_depth, leaf=1)
+    b_at_bound = _nested_list(max_depth, leaf=2)
+    diff = DeepDiff(a_at_bound, b_at_bound, max_depth=max_depth)
+    assert bool(diff) is True
+
+    a_over_bound = _nested_list(max_depth + 1, leaf=1)
+    b_over_bound = _nested_list(max_depth + 1, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a_over_bound, b_over_bound, max_depth=max_depth)
+
+
+def test_default_max_depth_matches_onix_core() -> None:
+    """The constructor's default max_depth is onix_core::DEFAULT_MAX_DEPTH."""
+    a = _nested_list(DEFAULT_MAX_DEPTH, leaf=1)
+    b = _nested_list(DEFAULT_MAX_DEPTH, leaf=2)
+    diff = DeepDiff(a, b)
+    assert bool(diff) is True
+
+    a_over = _nested_list(DEFAULT_MAX_DEPTH + 1, leaf=1)
+    b_over = _nested_list(DEFAULT_MAX_DEPTH + 1, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a_over, b_over)
+
+
+# The sized-worker cases: unequal input nested BELOW max_depth (so conversion
+# succeeds and the diff itself runs). Each runs in its own subprocess so a
+# crash is a failed assertion, not a dead suite.
+
+
+def test_deep_unequal_lists_below_max_depth_return_correct_diff() -> None:
+    """10,000-deep unequal lists with a higher max_depth diff correctly (no crash)."""
+    result = _run_isolated(
+        """
+        import json
+        depth = 10_000
+        a = 1
+        b = 2
+        for _ in range(depth):
+            a = [a]
+            b = [b]
+        report = json.loads(DeepDiff(a, b, max_depth=12_000).to_json())
+        changed = report["values_changed"]
+        assert len(changed) == 1, changed
+        (path, delta), = changed.items()
+        assert path.count("[") == depth, path
+        assert delta == {"new_value": 2, "old_value": 1}, delta
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_near_ceiling_lists_and_dicts_return_correct_diff() -> None:
+    """Unequal lists AND dicts nested near the ceiling diff correctly (no crash)."""
+    result = _run_isolated(
+        f"""
+        import json
+        depth = {MAX_DEPTH_CEILING} - 1_000
+        max_depth = {MAX_DEPTH_CEILING}
+
+        list_a, list_b = 1, 2
+        dict_a, dict_b = 1, 2
+        for _ in range(depth):
+            list_a, list_b = [list_a], [list_b]
+            dict_a, dict_b = {{"k": dict_a}}, {{"k": dict_b}}
+
+        for a, b, opener in ((list_a, list_b, "["), (dict_a, dict_b, "[")):
+            report = json.loads(DeepDiff(a, b, max_depth=max_depth).to_json())
+            (path, delta), = report["values_changed"].items()
+            assert path.count(opener) == depth, (opener, path.count(opener))
+            assert delta == {{"new_value": 2, "old_value": 1}}, delta
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_near_ceiling_tuples_return_correct_diff() -> None:
+    """Unequal tuples nested near the ceiling diff correctly (no crash), like lists and dicts."""
+    result = _run_isolated(
+        f"""
+        import json
+        depth = {MAX_DEPTH_CEILING} - 1_000
+        a, b = 1, 2
+        for _ in range(depth):
+            a, b = (a,), (b,)
+
+        report = json.loads(DeepDiff(a, b, max_depth={MAX_DEPTH_CEILING}).to_json())
+        (path, delta), = report["values_changed"].items()
+        assert path.count("[") == depth, path.count("[")
+        assert delta == {{"new_value": 2, "old_value": 1}}, delta
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_deep_report_lifecycle_to_dict_then_del_does_not_crash() -> None:
+    """A deep diff report survives to_dict() and del (its deep Value drops safely)."""
+    result = _run_isolated(
+        f"""
+        big = 1
+        for _ in range({MAX_DEPTH_CEILING} - 5_000):
+            big = {{"k": big}}
+        diff = DeepDiff({{}}, {{"x": big}}, max_depth={MAX_DEPTH_CEILING})
+        parsed = diff.to_dict()
+        assert "dictionary_item_added" in parsed, parsed.keys()
+        del parsed
+        del diff
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_deep_report_renders_to_json_from_a_small_stack_thread() -> None:
+    """
+    A report nested past the inline threshold renders to JSON without crashing.
+
+    Rendering is natively recursive, so a deep report must go to the sized
+    worker; the deep values are built and torn down on the spawning thread.
+    """
+    result = _run_isolated(
+        f"""
+        import threading
+        depth = {MAX_DEPTH_CEILING} - 5_000
+        deep_tuple, deep_list = 1, 1
+        for _ in range(depth):
+            deep_tuple = (deep_tuple,)
+            deep_list = [deep_list]
+
+        # A tuple-vs-list type change at the root: one entry carrying both
+        # deep values, so the report itself is nested far past the threshold.
+        diff = DeepDiff(deep_tuple, deep_list, max_depth={MAX_DEPTH_CEILING})
+        outcome = []
+
+        def work():
+            outcome.append(len(diff.to_json()))
+            outcome.append(len(repr(diff)))
+
+        threading.stack_size(512 * 1024)
+        t = threading.Thread(target=work)
+        t.start()
+        t.join()
+        assert len(outcome) == 2, outcome
+        assert outcome[0] > depth, outcome
+        assert outcome[1] > outcome[0], outcome
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="RLIMIT_AS is only enforced on Linux",
+)
+def test_default_depth_diff_fits_an_address_space_limit_under_the_ceiling_reservation() -> None:
+    """
+    A default-depth diff on the worker thread succeeds where a ceiling-sized one cannot spawn.
+    """
+    result = _run_isolated(
+        """
+        import resource, threading
+        limit = 320 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+        threading.stack_size(327_680_000)
+        try:
+            threading.Thread(target=lambda: None).start()
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the limit does not bind a 312.5 MiB reservation")
+
+        deep_a, deep_b = [1], [2]
+        for _ in range(100):
+            deep_a, deep_b = [deep_a], [deep_b]
+        diff = DeepDiff(deep_a, deep_b)
+        diff.to_json()
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_max_depth_above_ceiling_raises_value_error_naming_the_ceiling() -> None:
+    """A max_depth above the ceiling is refused up front with a catchable ValueError."""
+    with pytest.raises(ValueError, match=str(MAX_DEPTH_CEILING)) as excinfo:
+        DeepDiff([1], [2], max_depth=MAX_DEPTH_CEILING + 1)
+
+    # Not a MaxDepthError: this is the up-front ceiling refusal, a different
+    # (shallower) path than a nesting that exceeds an in-range max_depth.
+    assert not isinstance(excinfo.value, MaxDepthError)
+
+
+def test_max_depth_exactly_at_ceiling_is_accepted() -> None:
+    """max_depth == the ceiling is allowed (the boundary is inclusive)."""
+    diff = DeepDiff([1], [2], max_depth=MAX_DEPTH_CEILING)
+    assert bool(diff) is True
+
+
+def test_diff_json_max_depth_above_ceiling_raises_value_error() -> None:
+    """diff_json enforces the same ceiling as the DeepDiff class."""
+    with pytest.raises(ValueError, match=str(MAX_DEPTH_CEILING)):
+        diff_json("[1]", "[2]", max_depth=MAX_DEPTH_CEILING + 1)
+
+
+# Error-path safety: when one argument converts to a deep legal Value but the
+# other (or a later sibling within one argument) then fails to convert, the
+# early return must not drop the deep Value inline on the calling thread.
+
+
+def test_cross_arg_error_drops_deep_first_arg_without_crashing() -> None:
+    """Deep legal t1 + t2 with an unsupported type raises TypeError, never crashes."""
+    result = _run_isolated(
+        f"""
+        def deep(d):
+            v = 1
+            for _ in range(d):
+                v = {{"a": v, "b": 2}}
+            return v
+        t1 = deep({MAX_DEPTH_CEILING} - 1)
+        try:
+            DeepDiff(t1, {{"x": {{1j}}}}, max_depth={MAX_DEPTH_CEILING})
+        except TypeError:
+            print("OK")
+        else:
+            raise AssertionError("expected TypeError")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_intra_arg_error_after_deep_sibling_does_not_crash() -> None:
+    """A dict with a deep legal sibling then an unsupported sibling (a set) raises cleanly."""
+    result = _run_isolated(
+        f"""
+        def deep(d):
+            v = 1
+            for _ in range(d):
+                v = {{"a": v, "b": 2}}
+            return v
+        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": {{1j}}}}
+        try:
+            DeepDiff(t1, {{}}, max_depth={MAX_DEPTH_CEILING})
+        except TypeError:
+            print("OK")
+        else:
+            raise AssertionError("expected TypeError")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
+    """The deep-t1 + bad-t2 error path is safe even from a 512 KiB-stack Python thread."""
+    result = _run_isolated(
+        f"""
+        import threading
+        def deep(d):
+            v = 1
+            for _ in range(d):
+                v = {{"a": v, "b": 2}}
+            return v
+        # Build and tear down the deep object on the spawning thread (CPython's own
+        # recursive container code would overflow a 512 KiB stack); the small-stack
+        # thread runs only the DeepDiff call, with t1 kept alive until it joins.
+        t1 = deep({MAX_DEPTH_CEILING} - 1)
+        bad = {{"x": {{1j}}}}
+        outcome = []
+        def work():
+            try:
+                DeepDiff(t1, bad, max_depth={MAX_DEPTH_CEILING})
+            except TypeError:
+                outcome.append("ok")
+        threading.stack_size(512 * 1024)
+        t = threading.Thread(target=work)
+        t.start()
+        t.join()
+        assert outcome == ["ok"], outcome
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_tuple_hashing_cost_stays_linear_in_nesting_depth() -> None:
+    """
+    Hashing a nested tuple must cost O(depth), not O(depth^2).
+
+    Under ``ignore_order`` each node is keyed in the digest cache by its
+    children's interned ids, not its whole subtree. Quadratic growth would show
+    as ~16x here, linear as ~4x.
+    """
+
+    def best_of_three(depth: int) -> float:
+        """
+        Time the fastest of three pure-shuffle diffs of a `depth`-deep tuple.
+
+        :param depth: Nesting depth of the tuple being shuffled.
+        :return: The shortest wall-clock time observed, in seconds.
+        """
+        a = [_nested_tuple(depth, leaf=1), "x"]
+        b = ["x", _nested_tuple(depth, leaf=1)]
+        samples = []
+
+        for _ in range(3):
+            start = time.perf_counter()
+            diff = DeepDiff(a, b, ignore_order=True, max_depth=MAX_DEPTH_CEILING)
+            samples.append(time.perf_counter() - start)
+            assert not diff, diff.to_json()[:200]
+
+        return min(samples)
+
+    shallow = best_of_three(500)
+    deep = best_of_three(2000)
+    ratio = deep / shallow
+
+    assert ratio < 8.0, f"4x the depth cost {ratio:.1f}x the time; expected ~4x"
+
+
+def _nested_frozenset(depth: int, leaf: JsonValue) -> JsonValue:
+    """
+    Build a two-member frozenset nested `depth` levels deep around `leaf`.
+
+    Two members, not one: a single-member set is the case every ordering
+    shortcut handles trivially, so a one-member nest cannot detect a cost
+    that scales with a set's *own* member count.
+
+    :param depth: How many frozenset layers to wrap `leaf` in.
+    :param leaf: The innermost value.
+    :return: `leaf` wrapped in `depth` two-member frozensets.
+    """
+    value = leaf
+
+    for level in range(depth):
+        value = frozenset({value, level})
+
+    return value
+
+
+def test_a_deep_two_member_set_converts_on_a_small_stack_thread() -> None:
+    """A set of two deep members must not overflow the stack while it is being built.
+
+    Conversion runs on the calling thread — `guard.rs`'s sized worker takes
+    only the diff and the JSON rendering — so every walk it triggers has to be
+    iterative. Building a set orders its members, and that comparison must
+    stay iterative.
+    """
+    result = _run_isolated(
+        f"""
+        import threading
+
+        def spine(leaf, depth):
+            value = leaf
+            for _ in range(depth):
+                value = (value,)
+            return value
+
+        outcome = []
+
+        def work():
+            # Equal until the leaf, so the comparison cannot short-circuit.
+            members = {{spine((0,), 3000), spine((1,), 3000)}}
+            other = {{spine((2,), 3000)}}
+            diff = DeepDiff(members, other, max_depth={MAX_DEPTH_CEILING})
+            outcome.append(len(diff.to_dict()["set_item_added"]))
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=work)
+        thread.start()
+        thread.join()
+        assert outcome == [1], outcome
+        print("OK")
+        """,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+def test_frozenset_hashing_cost_stays_linear_in_nesting_depth() -> None:
+    """
+    Diffing a nested frozenset must cost O(depth), not O(depth^2).
+
+    Nodes are keyed by their members' interned ids, and nothing may render a
+    member to order it. Quadratic growth would show as ~16x here, linear as ~4x.
+    See `test_tuple_hashing_cost_stays_linear_in_nesting_depth`.
+    """
+
+    def best_of_three(depth: int) -> float:
+        """
+        Time the fastest of three pure-shuffle diffs of a `depth`-deep frozenset.
+
+        :param depth: Nesting depth of the frozenset being shuffled.
+        :return: The shortest wall-clock time observed, in seconds.
+        """
+        a = [_nested_frozenset(depth, leaf=1), "x"]
+        b = ["x", _nested_frozenset(depth, leaf=1)]
+        samples = []
+
+        for _ in range(3):
+            start = time.perf_counter()
+            diff = DeepDiff(a, b, ignore_order=True, max_depth=MAX_DEPTH_CEILING)
+            samples.append(time.perf_counter() - start)
+            assert not diff, diff.to_json()[:200]
+
+        return min(samples)
+
+    shallow = best_of_three(500)
+    deep = best_of_three(2000)
+    ratio = deep / shallow
+
+    assert ratio < 8.0, f"4x the depth cost {ratio:.1f}x the time; expected ~4x"
+
+
+def test_shallow_diff_per_call_overhead_is_bounded() -> None:
+    """A trivial diff must not pay per-call thread-spawn overhead (shallow inline path)."""
+    a = {"a": 1, "b": 2}
+    b = {"a": 1, "b": 3}
+    DeepDiff(a, b)  # warmup
+    samples = []
+    for _ in range(2000):
+        start = time.perf_counter()
+        DeepDiff(a, b)
+        samples.append(time.perf_counter() - start)
+    median_us = statistics.median(samples) * 1e6
+    # Wide, one-directional bound against a thread-spawn-per-call slowdown.
+    assert median_us < 25.0, f"median {median_us:.2f} us exceeds 25 us"
+
+
+# diff_json's own depth guard (no Python-object conversion involved -- JSON
+# text is parsed and diffed entirely in Rust).
+
+
+def _nested_json_array(depth: int, leaf: int) -> str:
+    """
+    Build a JSON array literal nested `depth` levels deep around `leaf`.
+
+    :param depth: How many array layers to wrap `leaf` in.
+    :param leaf: The innermost scalar.
+    :return: The JSON text, built by string concatenation (no recursion).
+    """
+    return ("[" * depth) + str(leaf) + ("]" * depth)
+
+
+def test_diff_json_moderately_deep_input_raises_max_depth_error() -> None:
+    """A JSON array past a small max_depth but under `serde_json`'s parser limit
+    (127 nested arrays) parses, then raises MaxDepthError from the diff.
+    """
+    a = _nested_json_array(50, leaf=1)
+    b = _nested_json_array(50, leaf=2)
+
+    with pytest.raises(MaxDepthError):
+        diff_json(a, b, max_depth=10)
+
+
+def test_diff_json_127_nested_arrays_parse() -> None:
+    """127 nested arrays, the deepest `serde_json` accepts, diff without error."""
+    assert diff_json(_nested_json_array(127, leaf=1), _nested_json_array(127, leaf=1)) == "{}"
+
+
+def test_diff_json_128_nested_arrays_raise_value_error() -> None:
+    """128 nested arrays exceed `serde_json`'s parser recursion limit."""
+    with pytest.raises(ValueError, match="recursion limit exceeded"):
+        diff_json(_nested_json_array(128, leaf=1), _nested_json_array(128, leaf=1))
+
+
+def test_diff_json_reference_parses_with_standard_json_module() -> None:
+    """Sanity check: the fixture builder produces valid JSON."""
+    assert json.loads(_nested_json_array(5, leaf=1)) == [[[[[1]]]]]
+
+
+class _Node:
+    """A plain attribute-only class, for building a deep custom-object chain."""
+
+    def __init__(self, child: object) -> None:
+        self.child = child
+
+
+def _nested_object(depth: int, leaf: object) -> object:
+    """
+    Wrap `leaf` in `depth` nested custom objects, iteratively.
+
+    :param depth: How many object layers to wrap `leaf` in.
+    :param leaf: The innermost value.
+    :return: `leaf` behind `depth` `.child` attributes.
+    """
+    value: object = leaf
+
+    for _ in range(depth):
+        value = _Node(value)
+
+    return value
+
+
+def test_deep_custom_object_nesting_raises_max_depth_error_not_a_crash() -> None:
+    """An adversarially deep custom-object chain raises MaxDepthError, never crashes."""
+    a = _nested_object(DEFAULT_MAX_DEPTH + 50, 1)
+    b = _nested_object(DEFAULT_MAX_DEPTH + 50, 2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b)
+
+
+def test_deep_custom_object_nesting_past_a_raised_max_depth_raises_at_conversion_time() -> None:
+    """A custom-object chain nested past an in-ceiling max_depth raises MaxDepthError at conversion."""
+    a = _nested_object(MAX_DEPTH_CEILING + 10, 1)
+    b = _nested_object(MAX_DEPTH_CEILING + 10, 2)
+
+    with pytest.raises(MaxDepthError):
+        DeepDiff(a, b, max_depth=MAX_DEPTH_CEILING)
+

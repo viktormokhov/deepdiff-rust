@@ -1,0 +1,142 @@
+"""Each ``tests/golden/`` case through the bindings and through real DeepDiff, compared after
+``golden_tags.canonical_report``."""
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+if sys.version_info < (3, 14):
+    pytest.skip(
+        "golden fixtures are generated on Python 3.14 (Unicode 16)",
+        allow_module_level=True,
+    )
+
+from deepdiff import DeepDiff as RealDeepDiff
+from golden_tags import TaggedValue, canonical_report, decode_tags, sorted_set_categories
+
+from deepdiff_rs import DeepDiff as OnixDeepDiff
+
+GOLDEN_ROOT = Path(__file__).resolve().parent / "golden"
+
+# Mirrors golden.rs's KNOWN_DIVERGENT_CASES.
+KNOWN_DIVERGENT_CASES = {"path_rendering_collision"}
+
+
+def _case_names() -> list[str]:
+    """
+    List every golden case directory name, sorted for a deterministic order.
+
+    :return: Sorted case directory names under ``tests/golden/``.
+    """
+    return sorted(entry.name for entry in GOLDEN_ROOT.iterdir() if entry.is_dir())
+
+
+def _deepdiff_raises_cases() -> list[str]:
+    """
+    List every crash-class case name real DeepDiff raises on.
+
+    A case whose ``expected.json`` carries a ``"deepdiff_raises"`` key is one
+    real DeepDiff crashes on; onix returns a report instead. The presence of
+    that key is the detection rule — the same one
+    ``crates/onix-core/tests/golden.rs``'s ``is_deepdiff_crash_case`` uses.
+
+    :return: Sorted crash-class case directory names.
+    """
+    return sorted(
+        name
+        for name in _case_names()
+        if "deepdiff_raises" in json.loads((GOLDEN_ROOT / name / "expected.json").read_text())
+    )
+
+
+_DEEPDIFF_RAISES_CASES = _deepdiff_raises_cases()
+
+
+def _read_json(path: Path) -> TaggedValue:
+    """
+    Read and parse a JSON fixture file.
+
+    :param path: Path to the JSON file.
+    :return: The parsed JSON value.
+    """
+    return json.loads(path.read_text())
+
+
+def _read_case_input(path: Path) -> TaggedValue:
+    """
+    Read one of a case's two input files as the Python value it stands for.
+
+    :param path: Path to ``a.json`` or ``b.json``.
+    :return: The decoded value, with tagged objects turned back into Python objects.
+    """
+    return decode_tags(_read_json(path))
+
+
+def _case_options(case_dir: Path) -> dict[str, TaggedValue]:
+    """
+    Read a case's ``options.json``, defaulting to ``{}`` if absent.
+
+    :param case_dir: The golden case's directory.
+    :return: The parsed options, or an empty dict if the file is missing.
+    """
+    options_path = case_dir / "options.json"
+
+    if not options_path.exists():
+        return {}
+
+    return _read_json(options_path)
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        name
+        for name in _case_names()
+        if name not in KNOWN_DIVERGENT_CASES and name not in _DEEPDIFF_RAISES_CASES
+    ],
+)
+def test_golden_case_matches_real_deepdiff(case_name: str) -> None:
+    """
+    Assert onix's bindings match real DeepDiff's ``to_json()`` on a golden case.
+
+    :param case_name: The golden case directory name (parametrized over the
+        whole corpus, minus :data:`KNOWN_DIVERGENT_CASES` and the crash-class
+        cases in :data:`_DEEPDIFF_RAISES_CASES`).
+    """
+    case_dir = GOLDEN_ROOT / case_name
+    a = _read_case_input(case_dir / "a.json")
+    b = _read_case_input(case_dir / "b.json")
+    ignore_order = bool(_case_options(case_dir).get("ignore_order", False))
+
+    expected = canonical_report(RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2))
+    actual = sorted_set_categories(OnixDeepDiff(a, b, ignore_order=ignore_order))
+
+    assert actual == expected
+
+
+@pytest.mark.parametrize("case_name", _DEEPDIFF_RAISES_CASES)
+def test_deepdiff_crash_case_onix_matches_pinned_report(case_name: str) -> None:
+    """
+    Assert real DeepDiff raises the recorded exception while onix matches its pinned report.
+
+    :param case_name: A crash-class golden case (see :func:`_deepdiff_raises_cases`).
+    """
+    case_dir = GOLDEN_ROOT / case_name
+    a = _read_case_input(case_dir / "a.json")
+    b = _read_case_input(case_dir / "b.json")
+    ignore_order = bool(_case_options(case_dir).get("ignore_order", False))
+    marker = _read_json(case_dir / "expected.json")
+
+    with pytest.raises(Exception) as excinfo:  # noqa: B017,PT011 - the exact type is asserted next
+        RealDeepDiff(a, b, ignore_order=ignore_order, verbose_level=2)
+
+    assert type(excinfo.value).__name__ == marker["deepdiff_raises"]
+
+    assert OnixDeepDiff(a, b, ignore_order=ignore_order).to_dict() == decode_tags(marker["onix"])
+
+
+def test_golden_corpus_is_non_empty() -> None:
+    """Guard against a silently empty parametrize list (e.g. a bad path)."""
+    assert len(_case_names()) > len(KNOWN_DIVERGENT_CASES)

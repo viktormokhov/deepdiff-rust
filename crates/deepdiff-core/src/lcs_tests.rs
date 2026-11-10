@@ -1,0 +1,825 @@
+use super::Tag;
+use crate::test_support::{cdate, cdt, cdt_at, ctime, ctimedelta, cv, cvec};
+use serde_json::json;
+
+fn all_basic_scalars(items: &[serde_json::Value]) -> bool {
+    super::all_basic_scalars(&cvec(items))
+}
+fn compute_opcodes(a: &[serde_json::Value], b: &[serde_json::Value]) -> Vec<super::Opcode> {
+    super::compute_opcodes(&cvec(a), &cvec(b))
+}
+fn scalar_key(value: &serde_json::Value) -> super::ScalarKey {
+    super::scalar_key(&cv(value))
+}
+
+/// Python `==` for two JSON scalars, via `ScalarKey`.
+fn python_scalar_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    scalar_key(a) == scalar_key(b)
+}
+
+fn grouped_opcodes(
+    a: &[serde_json::Value],
+    b: &[serde_json::Value],
+    n: usize,
+) -> Vec<Vec<super::Opcode>> {
+    super::grouped_opcodes(&cvec(a), &cvec(b), n)
+}
+
+// --- all_basic_scalars ---------------------------------------------
+
+#[test]
+fn empty_slice_is_vacuously_all_scalar() {
+    assert!(all_basic_scalars(&[]));
+}
+
+#[test]
+fn every_json_scalar_kind_qualifies() {
+    assert!(all_basic_scalars(&[
+        serde_json::Value::Null,
+        json!(true),
+        json!(1),
+        json!(1.5),
+        json!("s"),
+    ]));
+}
+
+#[test]
+fn a_nested_array_disqualifies() {
+    assert!(!all_basic_scalars(&[json!(1), json!([1])]));
+}
+
+#[test]
+fn a_nested_object_disqualifies() {
+    assert!(!all_basic_scalars(&[json!(1), json!({"a": 1})]));
+}
+
+// --- python_scalar_eq: Python cross-type equality ---
+
+#[test]
+fn int_and_equal_float_are_python_equal() {
+    assert!(python_scalar_eq(&json!(1), &json!(1.0)));
+}
+
+#[test]
+fn bool_and_equal_int_are_python_equal() {
+    assert!(python_scalar_eq(&json!(true), &json!(1)));
+    assert!(python_scalar_eq(&json!(false), &json!(0)));
+}
+
+#[test]
+fn positive_and_negative_zero_are_python_equal() {
+    assert!(python_scalar_eq(&json!(0.0), &json!(-0.0)));
+}
+
+#[test]
+fn different_numeric_values_are_not_python_equal() {
+    assert!(!python_scalar_eq(&json!(1), &json!(2)));
+}
+
+#[test]
+fn string_and_number_are_never_python_equal() {
+    assert!(!python_scalar_eq(&json!("1"), &json!(1)));
+}
+
+#[test]
+fn null_is_only_python_equal_to_null() {
+    assert!(python_scalar_eq(
+        &serde_json::Value::Null,
+        &serde_json::Value::Null
+    ));
+    assert!(!python_scalar_eq(&serde_json::Value::Null, &json!(0)));
+}
+
+#[test]
+fn non_integral_floats_compare_by_value() {
+    assert!(python_scalar_eq(&json!(1.5), &json!(1.5)));
+    assert!(!python_scalar_eq(&json!(1.5), &json!(2.5)));
+}
+
+// `NaN` cannot arrive via `json!`/`cv` (`serde_json::Number` is finite by
+// construction), so these build the compact `Value` directly rather than
+// through the `serde_json`-literal wrapper the tests above share.
+#[test]
+fn two_distinct_nans_are_never_python_equal() {
+    use crate::value::{Number, Value};
+
+    let a = Value::Number(Number::from_f64(f64::NAN));
+    let b = Value::Number(Number::from_f64(f64::NAN));
+    assert_ne!(
+        super::python_scalar_key(&a),
+        super::python_scalar_key(&b),
+        "two independently-built NaN values must never share a ScalarKey"
+    );
+}
+
+#[test]
+fn the_same_nan_value_reference_yields_the_same_scalar_key() {
+    use crate::value::{Number, Value};
+
+    let a = Value::Number(Number::from_f64(f64::NAN));
+    assert_eq!(
+        super::python_scalar_key(&a),
+        super::python_scalar_key(&a),
+        "hashing/keying the same Value node twice must agree with itself"
+    );
+}
+
+#[test]
+fn nan_and_infinity_never_share_a_scalar_key() {
+    use crate::value::{Number, Value};
+
+    let nan = Value::Number(Number::from_f64(f64::NAN));
+    let inf = Value::Number(Number::from_f64(f64::INFINITY));
+    assert_ne!(
+        super::python_scalar_key(&nan),
+        super::python_scalar_key(&inf)
+    );
+}
+
+#[test]
+fn scalar_key_nan_hashes_and_is_usable_as_a_hashmap_key() {
+    use std::collections::HashMap;
+
+    use crate::value::{Number, Value};
+
+    let a = Value::Number(Number::from_f64(f64::NAN));
+    let b = Value::Number(Number::from_f64(f64::NAN));
+    let key_a = super::python_scalar_key(&a).expect("NaN is a scalar");
+    let key_b = super::python_scalar_key(&b).expect("NaN is a scalar");
+
+    let mut map: HashMap<super::ScalarKey, &str> = HashMap::new();
+    map.insert(key_a.clone(), "a");
+    map.insert(key_b.clone(), "b");
+    // Two distinct NaNs never collapse to one entry, matching Python's own
+    // `nan != nan` (see `super::ScalarKey::Nan`'s own doc).
+    assert_eq!(map.len(), 2);
+    assert_eq!(map.get(&key_a), Some(&"a"));
+    assert_eq!(map.get(&key_b), Some(&"b"));
+}
+
+// --- compute_opcodes -------------------------------------------------
+
+fn vals(items: &[i64]) -> Vec<serde_json::Value> {
+    items.iter().map(|&i| json!(i)).collect()
+}
+
+fn vals_str(items: &[&str]) -> Vec<serde_json::Value> {
+    items.iter().map(|&s| json!(s)).collect()
+}
+
+#[test]
+fn equal_lists_are_one_equal_opcode() {
+    let a = vals(&[1, 2, 3]);
+    let ops = compute_opcodes(&a, &a);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].tag, Tag::Equal);
+    assert_eq!((ops[0].a1, ops[0].a2, ops[0].b1, ops[0].b2), (0, 3, 0, 3));
+}
+
+#[test]
+fn empty_a_is_one_insert_opcode() {
+    let a: Vec<serde_json::Value> = Vec::new();
+    let b = vals(&[1, 2, 3]);
+    let ops = compute_opcodes(&a, &b);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].tag, Tag::Insert);
+    assert_eq!((ops[0].a1, ops[0].a2, ops[0].b1, ops[0].b2), (0, 0, 0, 3));
+}
+
+#[test]
+fn empty_b_is_one_delete_opcode() {
+    let a = vals(&[1, 2, 3]);
+    let b: Vec<serde_json::Value> = Vec::new();
+    let ops = compute_opcodes(&a, &b);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].tag, Tag::Delete);
+    assert_eq!((ops[0].a1, ops[0].a2, ops[0].b1, ops[0].b2), (0, 3, 0, 0));
+}
+
+#[test]
+fn both_empty_is_no_opcodes() {
+    let a: Vec<serde_json::Value> = Vec::new();
+    assert_eq!(compute_opcodes(&a, &a), vec![]);
+}
+
+/// Real `DeepDiff` matches this as an insert of `True` at
+/// the front plus a delete of the trailing `False` — see
+/// `tests/golden/list_lcs_repro_bool_reorder`.
+#[test]
+fn repro_bool_reorder_matches_real_deepdiff_opcodes() {
+    let a = vec![json!(false), json!(true), json!(false)];
+    let b = vec![json!(true), json!(false), json!(true)];
+    let ops = compute_opcodes(&a, &b);
+    assert_eq!(
+        ops,
+        vec![
+            super::Opcode {
+                tag: Tag::Insert,
+                a1: 0,
+                a2: 0,
+                b1: 0,
+                b2: 1,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 0,
+                a2: 2,
+                b1: 1,
+                b2: 3,
+            },
+            super::Opcode {
+                tag: Tag::Delete,
+                a1: 2,
+                a2: 3,
+                b1: 3,
+                b2: 3,
+            },
+        ]
+    );
+}
+
+#[test]
+fn equal_length_replace_is_one_replace_opcode() {
+    let a = vals(&[1, 2, 3]);
+    let b = vals(&[1, 5, 3]);
+    let ops = compute_opcodes(&a, &b);
+    assert_eq!(
+        ops,
+        vec![
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 0,
+                a2: 1,
+                b1: 0,
+                b2: 1,
+            },
+            super::Opcode {
+                tag: Tag::Replace,
+                a1: 1,
+                a2: 2,
+                b1: 1,
+                b2: 2,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 2,
+                a2: 3,
+                b1: 2,
+                b2: 3,
+            },
+        ]
+    );
+}
+
+/// A `Replace` opcode's two ranges never share a matching element.
+#[test]
+fn replace_opcode_ranges_never_share_a_matching_element() {
+    let cases: &[(&[i64], &[i64])] = &[
+        (&[0, 0, 3, 3, 0, 1, 0], &[4, 3, 0, 4]),
+        (&[1, 2, 1], &[2, 1, 2]),
+        (&[1, 2, 3], &[0, 3, 1, 2]),
+        (&[5, 1, 2, 3], &[1, 2, 3, 5]),
+    ];
+    for (a, b) in cases {
+        let a = vals(a);
+        let b = vals(b);
+        for op in compute_opcodes(&a, &b) {
+            if op.tag != Tag::Replace {
+                continue;
+            }
+            for x in &a[op.a1..op.a2] {
+                for y in &b[op.b1..op.b2] {
+                    assert!(
+                        !python_scalar_eq(x, y),
+                        "replace opcode {op:?} contains a matching pair {x:?}/{y:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The right-recursion bound finds a second insert past the first equal block.
+#[test]
+fn get_matching_blocks_right_recursion_finds_a_second_insert() {
+    let a = vals(&[1, 0, 0, 0]);
+    let b = vals(&[0, 0, 0, 1, 0, 0, 1, 0]);
+
+    assert_eq!(
+        compute_opcodes(&a, &b),
+        vec![
+            super::Opcode {
+                tag: Tag::Insert,
+                a1: 0,
+                a2: 0,
+                b1: 0,
+                b2: 3,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 0,
+                a2: 3,
+                b1: 3,
+                b2: 6,
+            },
+            super::Opcode {
+                tag: Tag::Insert,
+                a1: 3,
+                a2: 3,
+                b1: 6,
+                b2: 7,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 3,
+                a2: 4,
+                b1: 7,
+                b2: 8,
+            },
+        ]
+    );
+}
+
+fn blocks(a: &[serde_json::Value], b: &[serde_json::Value]) -> Vec<(usize, usize, usize)> {
+    super::get_matching_blocks(&cvec(a), &cvec(b), false)
+        .iter()
+        .map(|m| (m.a, m.b, m.size))
+        .collect()
+}
+
+#[test]
+fn get_matching_blocks_without_a_match_is_only_the_terminator() {
+    assert_eq!(blocks(&vals(&[1]), &vals(&[2, 3])), vec![(1, 2, 0)]);
+}
+
+#[test]
+fn get_matching_blocks_starting_past_the_origin_has_no_empty_leading_block() {
+    assert_eq!(
+        blocks(&vals(&[9, 1, 2]), &vals(&[1, 2])),
+        vec![(1, 0, 2), (3, 2, 0)]
+    );
+}
+
+/// The right-recursion bound finds a trailing insert.
+#[test]
+fn get_matching_blocks_right_recursion_finds_a_trailing_insert() {
+    let a = vec![
+        json!(2),
+        json!(0.0),
+        json!(1.0),
+        json!(2.0),
+        json!(false),
+        json!(1),
+    ];
+    let b = vec![json!(1.0), json!(2.0), json!(0.0), json!(0.0), json!(true)];
+
+    assert_eq!(
+        compute_opcodes(&a, &b),
+        vec![
+            super::Opcode {
+                tag: Tag::Delete,
+                a1: 0,
+                a2: 2,
+                b1: 0,
+                b2: 0,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 2,
+                a2: 5,
+                b1: 0,
+                b2: 3,
+            },
+            super::Opcode {
+                tag: Tag::Insert,
+                a1: 5,
+                a2: 5,
+                b1: 3,
+                b2: 4,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 5,
+                a2: 6,
+                b1: 4,
+                b2: 5,
+            },
+        ]
+    );
+}
+
+#[test]
+fn one_vs_one_point_zero_is_a_single_equal_opcode() {
+    // 1 and 1.0 match as 'equal', never a replace/type-change opcode.
+    let a = vec![json!(1)];
+    let b = vec![json!(1.0)];
+    let ops = compute_opcodes(&a, &b);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].tag, Tag::Equal);
+}
+
+// --- get_matching_blocks: adjacent-block collapsing -----------------
+// Adjacent raw matches found via different stack entries collapse into one.
+
+#[test]
+fn adjacent_matches_from_different_stack_entries_collapse_needs_and_not_or() {
+    // A single insert followed by a single equal: two raw matches
+    // ((0,0,0) the initial no-match state, and (0,1,1) the real "s0" match).
+    let a = vals_str(&["s0"]);
+    let b = vals_str(&["s2", "s0"]);
+
+    assert_eq!(
+        compute_opcodes(&a, &b),
+        vec![
+            super::Opcode {
+                tag: Tag::Insert,
+                a1: 0,
+                a2: 0,
+                b1: 0,
+                b2: 1,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 0,
+                a2: 1,
+                b1: 1,
+                b2: 2,
+            },
+        ]
+    );
+}
+
+#[test]
+fn collapse_check_needs_pending_a_plus_pending_size_not_times() {
+    let a = vals(&[2, 2, 0, 1, 1, 0, 1]);
+    let b = vals(&[1, 1, 1]);
+
+    assert_eq!(
+        compute_opcodes(&a, &b),
+        vec![
+            super::Opcode {
+                tag: Tag::Delete,
+                a1: 0,
+                a2: 3,
+                b1: 0,
+                b2: 0,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 3,
+                a2: 5,
+                b1: 0,
+                b2: 2,
+            },
+            super::Opcode {
+                tag: Tag::Delete,
+                a1: 5,
+                a2: 6,
+                b1: 2,
+                b2: 2,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 6,
+                a2: 7,
+                b1: 2,
+                b2: 3,
+            },
+        ]
+    );
+}
+
+#[test]
+fn collapse_check_needs_pending_b_plus_pending_size_not_times() {
+    let a = vec![json!(0), json!(2), json!(2)];
+    let b = vec![
+        json!(false),
+        json!(1.0),
+        json!(2),
+        json!(0),
+        json!(2.0),
+        json!(0),
+        json!(2),
+    ];
+
+    assert_eq!(
+        compute_opcodes(&a, &b),
+        vec![
+            super::Opcode {
+                tag: Tag::Insert,
+                a1: 0,
+                a2: 0,
+                b1: 0,
+                b2: 3,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 0,
+                a2: 2,
+                b1: 3,
+                b2: 5,
+            },
+            super::Opcode {
+                tag: Tag::Insert,
+                a1: 2,
+                a2: 2,
+                b1: 5,
+                b2: 6,
+            },
+            super::Opcode {
+                tag: Tag::Equal,
+                a1: 2,
+                a2: 3,
+                b1: 6,
+                b2: 7,
+            },
+        ]
+    );
+}
+
+// --- datetimes and dates -------------------------------------------------
+
+#[test]
+fn calendar_values_are_basic_scalars() {
+    // DeepDiff's `helper.basic_types` lists `datetime.datetime` and
+    // `datetime.date`, so a list of them takes the difflib path.
+    assert!(super::all_basic_scalars(&[
+        cdt(2024, 1, 1, None),
+        cdate(2024, 1, 1),
+        cv(&json!(1)),
+    ]));
+}
+
+#[test]
+fn datetime_scalar_keys_follow_pythons_own_equality_not_the_engines() {
+    let naive = super::python_scalar_key(&cdt_at(2024, 1, 1, 10, 0, 0, 0, None));
+    let utc = super::python_scalar_key(&cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(0)));
+    let plus_two = super::python_scalar_key(&cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600)));
+
+    // Two aware values at one instant are Python-equal...
+    assert_eq!(utc, plus_two);
+    // ...but a naive value never equals an aware one, however the engine's
+    // own instant comparison reads it.
+    assert_ne!(naive, utc);
+}
+
+#[test]
+fn a_date_key_never_equals_a_datetime_key_or_another_dates() {
+    let date = super::python_scalar_key(&cdate(2024, 1, 1));
+
+    assert_ne!(date, super::python_scalar_key(&cdt(2024, 1, 1, None)));
+    assert_ne!(date, super::python_scalar_key(&cdate(2024, 1, 2)));
+    assert_eq!(date, super::python_scalar_key(&cdate(2024, 1, 1)));
+}
+
+#[test]
+fn time_scalar_keys_follow_pythons_own_equality_not_the_engines() {
+    let naive = super::python_scalar_key(&ctime(10, 0, 0, 0, None));
+    let utc = super::python_scalar_key(&ctime(10, 0, 0, 0, Some(0)));
+    let plus_two = super::python_scalar_key(&ctime(12, 0, 0, 0, Some(2 * 3600)));
+
+    // Two aware values at one instant are Python-equal...
+    assert_eq!(utc, plus_two);
+    // ...but a naive value never equals an aware one -- unlike a datetime,
+    // no "read naive as UTC" rule applies here (see
+    // `docs/design/value-model.md`).
+    assert_ne!(naive, utc);
+}
+
+/// `ScalarKey`'s `Hash` agrees with `Eq` for time and timedelta keys.
+#[test]
+fn time_and_timedelta_scalar_keys_hash_consistently_with_their_equality() {
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<super::ScalarKey> = HashSet::new();
+    seen.insert(super::python_scalar_key(&ctime(10, 0, 0, 0, Some(0))).expect("time is a scalar"));
+    seen.insert(super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("timedelta is a scalar"));
+
+    assert!(seen.contains(
+        &super::python_scalar_key(&ctime(12, 0, 0, 0, Some(2 * 3600))).expect("time is a scalar")
+    ));
+    assert!(seen.contains(&super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("scalar")));
+    assert!(!seen.contains(&super::python_scalar_key(&ctimedelta(0, 2, 0)).expect("scalar")));
+}
+
+#[test]
+fn timedelta_scalar_key_hash_agrees_with_equality_via_a_direct_hasher() {
+    use std::hash::{Hash, Hasher};
+
+    fn hash_of(key: &super::ScalarKey) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let a = super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("timedelta is a scalar");
+    let b = super::python_scalar_key(&ctimedelta(0, 1, 0)).expect("timedelta is a scalar");
+    let c = super::python_scalar_key(&ctimedelta(0, 2, 0)).expect("timedelta is a scalar");
+
+    assert_eq!(hash_of(&a), hash_of(&b));
+    assert_ne!(hash_of(&a), hash_of(&c));
+}
+
+/// `mix_float_bits` spreads the low byte of integral and half-integer floats.
+#[test]
+fn mix_float_bits_spreads_low_bits_of_integral_and_half_integer_floats() {
+    use std::collections::HashSet;
+    for &half in &[0.0_f64, 0.5] {
+        let low_bytes: HashSet<u8> = (0..1000u64)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let f = i as f64 + half;
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    (super::mix_float_bits(f.to_bits()) & 0xff) as u8
+                }
+            })
+            .collect();
+        // The raw bit patterns share their low byte (all zeros); mixed, 1000
+        // of them must cover most of the 256 possible low bytes.
+        assert!(
+            low_bytes.len() > 200,
+            "mixed low byte covered only {} of 256 values for +{half}",
+            low_bytes.len()
+        );
+    }
+    // Distinct inputs stay distinct (the mix is injective enough for a key).
+    assert_ne!(
+        super::mix_float_bits(1.0_f64.to_bits()),
+        super::mix_float_bits(2.0_f64.to_bits())
+    );
+}
+
+// --- grouped_opcodes -----------------------------------------------
+
+#[test]
+fn grouped_opcodes_of_empty_inputs_yields_no_groups() {
+    // `get_opcodes` is empty for two empty sequences, so the fallback dummy
+    // "equal" opcode is inserted and then dropped as a trivial single-equal
+    // group — no group is emitted.
+    assert_eq!(
+        grouped_opcodes(&[], &[], 3),
+        Vec::<Vec<super::Opcode>>::new()
+    );
+}
+
+#[test]
+fn grouped_opcodes_of_identical_inputs_yields_no_groups() {
+    let same = vec![json!("a"), json!("b"), json!("c")];
+    assert_eq!(
+        grouped_opcodes(&same, &same, 3),
+        Vec::<Vec<super::Opcode>>::new()
+    );
+}
+
+#[test]
+fn grouped_opcodes_splits_far_apart_changes_into_separate_groups() {
+    // Changes at index 1 and 15 with >2n unchanged lines between them, so the
+    // long equal run splits the opcodes into two groups (difflib's cluster
+    // isolation).
+    let a: Vec<serde_json::Value> = (0..20).map(|i| json!(format!("L{i}"))).collect();
+    let b: Vec<serde_json::Value> = (0..20)
+        .map(|i| match i {
+            1 => json!("X1"),
+            15 => json!("X15"),
+            _ => json!(format!("L{i}")),
+        })
+        .collect();
+    assert_eq!(grouped_opcodes(&a, &b, 3).len(), 2);
+}
+
+// --- find_longest_match extension step (autojunk-only) --------------
+// Direct calls with a hand-built `b2j` omitting a purged element; only extension can bridge it.
+
+fn keys(items: &[serde_json::Value]) -> Vec<super::ScalarKey> {
+    items.iter().map(scalar_key).collect()
+}
+
+fn b2j_from(keys: &[super::ScalarKey]) -> std::collections::HashMap<super::ScalarKey, Vec<usize>> {
+    // A b2j built by hand so a chosen key can be omitted (purged).
+    let mut map: std::collections::HashMap<super::ScalarKey, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, k) in keys.iter().enumerate() {
+        map.entry(k.clone()).or_default().push(i);
+    }
+    map
+}
+
+#[test]
+fn extension_bridges_a_purged_element_backward() {
+    // a = [P, P, u], b = [P, u]; P is purged from b2j, so the DP only finds
+    // `u` (a[2] == b[1]); the backward extension must re-bridge one `P` to
+    // give the full match a[1..3] == b[0..2].
+    let a_keys = keys(&[json!("P"), json!("P"), json!("u")]);
+    let b_keys = keys(&[json!("P"), json!("u")]);
+    let mut b2j = b2j_from(&b_keys);
+    b2j.remove(&scalar_key(&json!("P")));
+    let window = super::Window {
+        alo: 0,
+        ahi: a_keys.len(),
+        blo: 0,
+        bhi: b_keys.len(),
+    };
+    assert_eq!(
+        super::find_longest_match(&a_keys, &b_keys, window, &b2j, true),
+        (1, 0, 2),
+    );
+}
+
+#[test]
+fn extension_bridges_a_purged_element_forward() {
+    // a = [u, P], b = [u, P, P]; P purged, DP finds only `u` (a[0] == b[0]);
+    // the forward extension must re-bridge one `P`, giving a[0..2] == b[0..2].
+    let a_keys = keys(&[json!("u"), json!("P")]);
+    let b_keys = keys(&[json!("u"), json!("P"), json!("P")]);
+    let mut b2j = b2j_from(&b_keys);
+    b2j.remove(&scalar_key(&json!("P")));
+    let window = super::Window {
+        alo: 0,
+        ahi: a_keys.len(),
+        blo: 0,
+        bhi: b_keys.len(),
+    };
+    assert_eq!(
+        super::find_longest_match(&a_keys, &b_keys, window, &b2j, false),
+        (0, 0, 1),
+        "with extend=false the purged P is not bridged"
+    );
+    assert_eq!(
+        super::find_longest_match(&a_keys, &b_keys, window, &b2j, true),
+        (0, 0, 2),
+        "with extend=true the forward extension bridges one P"
+    );
+}
+
+// --- build_b2j autojunk purge --------------------------------------
+
+#[test]
+fn build_b2j_purges_only_above_the_autojunk_threshold() {
+    // 200 elements: `ntest = 200 / 100 + 1 = 3`. "pop" (4 occurrences) is
+    // purged; "keep3" (exactly 3) is kept, as is every unique filler.
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    items.extend(std::iter::repeat_n(json!("pop"), 4));
+    items.extend(std::iter::repeat_n(json!("keep3"), 3));
+    for i in 0..193 {
+        items.push(json!(format!("u{i}")));
+    }
+    assert_eq!(items.len(), 200);
+    let b_keys = keys(&items);
+
+    let purged = super::build_b2j(&b_keys, true);
+    assert!(
+        !purged.contains_key(&scalar_key(&json!("pop"))),
+        "pop occurs 4 times (> ntest 3) and must be purged"
+    );
+    assert!(
+        purged.contains_key(&scalar_key(&json!("keep3"))),
+        "keep3 occurs exactly 3 times (== ntest) and must be kept"
+    );
+
+    // With autojunk off, nothing is ever purged even past 200 elements.
+    let unpurged = super::build_b2j(&b_keys, false);
+    assert!(unpurged.contains_key(&scalar_key(&json!("pop"))));
+}
+
+// --- arbitrary-precision integer scalar keys ----------------------------
+
+/// A big integer collapses onto the same `ScalarKey` as a float exactly equal
+/// to it (Python's `10**20 == 1e20`), and stays distinct from a float it does
+/// not equal — the ordered-list matcher's Python-`==` rule.
+#[test]
+fn big_integer_scalar_key_collapses_with_its_equal_float_only() {
+    use crate::value::{Number, Value};
+
+    let bigint = |s: &str| Value::Number(Number::from_bigint(s.parse().expect("integer")));
+    let float = |f: f64| Value::Number(Number::from_f64(f));
+
+    // 2^70 is exactly representable, so the big int and the float share a key.
+    let two_pow_70 = "1180591620717411303424";
+    assert_eq!(
+        super::python_scalar_key(&bigint(two_pow_70)),
+        super::python_scalar_key(&float(2f64.powi(70))),
+    );
+
+    // 10^23 is NOT exactly representable (`10**23 != 1e23` in f64), so the big
+    // int keeps its own `Big` key and never matches the float `1e23`.
+    let ten_pow_23 = "100000000000000000000000";
+    assert_ne!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        super::python_scalar_key(&float(1e23)),
+    );
+    assert!(matches!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        Some(super::ScalarKey::Big(_))
+    ));
+
+    // Two equal big ints share a key; two different ones do not.
+    assert_eq!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        super::python_scalar_key(&bigint(ten_pow_23)),
+    );
+    assert_ne!(
+        super::python_scalar_key(&bigint(ten_pow_23)),
+        super::python_scalar_key(&bigint("100000000000000000000001")),
+    );
+}

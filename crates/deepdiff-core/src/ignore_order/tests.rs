@@ -1,0 +1,4259 @@
+use super::IgnoreOrderMemo;
+use crate::diff::DiffOptions;
+use crate::test_support::{
+    carr, ccustom, ccustom_entries, cdate, cdt, cdt_at, cfrozen, cobj, cset, ctime, ctimedelta,
+    ctup, ctuple, cv, cvec,
+};
+use crate::value::{ObjectKey, SetItems, Value as CValue};
+use serde_json::json;
+
+fn diff_with_options(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    opts: &DiffOptions,
+) -> Result<crate::report::Report, crate::error::Error> {
+    crate::diff::diff_with_options(&cv(a), &cv(b), opts)
+}
+fn item_length(value: &serde_json::Value) -> usize {
+    super::distance::item_length(&cv(value))
+}
+fn type_change_leaf_length(a: &serde_json::Value, b: &serde_json::Value) -> usize {
+    super::distance::type_change_leaf_length(&cv(a), &cv(b))
+}
+fn rough_length(value: &serde_json::Value) -> usize {
+    super::distance::rough_length(&cv(value))
+}
+fn numeric_value(value: &serde_json::Value) -> Option<f64> {
+    super::distance::numeric_value(&cv(value))
+}
+fn count_diff_leaves(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+    depth: usize,
+    opts: &DiffOptions,
+) -> usize {
+    super::distance::count_diff_leaves(&cv(a), &cv(b), depth, opts, &super::IgnoreOrderMemo::new())
+        .unwrap()
+}
+fn count_object_diff_leaves(
+    a: &serde_json::Map<String, serde_json::Value>,
+    b: &serde_json::Map<String, serde_json::Value>,
+    depth: usize,
+    opts: &DiffOptions,
+) -> usize {
+    super::distance::count_object_diff_leaves(
+        &cobj(a),
+        &cobj(b),
+        depth,
+        opts,
+        &super::IgnoreOrderMemo::new(),
+    )
+    .unwrap()
+}
+fn count_array_diff_leaves(
+    a: &[serde_json::Value],
+    b: &[serde_json::Value],
+    depth: usize,
+    opts: &DiffOptions,
+) -> usize {
+    super::distance::count_array_diff_leaves(
+        &cvec(a),
+        &cvec(b),
+        depth,
+        opts,
+        &super::IgnoreOrderMemo::new(),
+    )
+    .unwrap()
+}
+fn item_key(value: &serde_json::Value) -> super::hash::ItemKey {
+    super::hash::item_key(&cv(value), &IgnoreOrderMemo::new())
+}
+
+fn ignore_order_diff(a: &serde_json::Value, b: &serde_json::Value) -> serde_json::Value {
+    diff_with_options(
+        a,
+        b,
+        &DiffOptions {
+            ignore_order: true,
+            ..DiffOptions::default()
+        },
+    )
+    .unwrap()
+    .to_json_value()
+}
+
+// --- end-to-end -----
+
+#[test]
+fn pure_shuffle_is_empty() {
+    assert_eq!(
+        ignore_order_diff(&json!([1, 2, 3]), &json!([3, 2, 1])),
+        json!({})
+    );
+}
+
+#[test]
+fn duplicates_multiplicity_change_is_invisible() {
+    assert_eq!(
+        ignore_order_diff(&json!([1, 1, 2]), &json!([1, 2, 2])),
+        json!({})
+    );
+}
+
+#[test]
+fn nested_list_reorder_inside_a_shuffled_outer_list_is_empty() {
+    assert_eq!(
+        ignore_order_diff(&json!([[1, 2, 3], "x"]), &json!(["x", [3, 2, 1]])),
+        json!({})
+    );
+}
+
+#[test]
+fn gate_below_threshold_engages_real_pairing() {
+    // n=100, one value replaced by a far-away one; ratio 2/201 is under the 0.7
+    // threshold, so distance-based pairing engages and the single differing pair
+    // is reported as one values_changed (not a raw add + a raw remove).
+    let a: Vec<i64> = (0..100).collect();
+    let mut b = a.clone();
+    b.reverse();
+    b[0] = 100_000;
+    let result = ignore_order_diff(&json!(a), &json!(b));
+    let changed = result["values_changed"].as_object().unwrap();
+    assert_eq!(changed.len(), 1);
+    assert!(result.get("iterable_item_added").is_none());
+    assert!(result.get("iterable_item_removed").is_none());
+}
+
+#[test]
+fn gate_above_threshold_falls_back_to_raw_add_remove_plus_merge() {
+    // a has 3 raw items but only 2 DISTINCT hashes; b has 2. Ratio uses
+    // DISTINCT hash counts (2+2)/(2+2+1) = 0.8 > 0.7, disabling pairing entirely.
+    assert_eq!(
+        ignore_order_diff(&json!([1, 1, 2]), &json!([3, 4])),
+        json!({
+            "values_changed": {"root[0]": {"new_value": 3, "old_value": 1}},
+            "iterable_item_added": {"root[1]": 4},
+            "iterable_item_removed": {"root[2]": 2},
+        })
+    );
+}
+
+#[test]
+fn one_sided_lists_are_all_added_or_all_removed() {
+    assert_eq!(
+        ignore_order_diff(&json!([]), &json!([1, 2, 3])),
+        json!({"iterable_item_added": {"root[0]": 1, "root[1]": 2, "root[2]": 3}})
+    );
+    assert_eq!(
+        ignore_order_diff(&json!([1, 2, 3]), &json!([])),
+        json!({"iterable_item_removed": {"root[0]": 1, "root[1]": 2, "root[2]": 3}})
+    );
+}
+
+#[test]
+fn nested_dict_pairing_with_index_drift_retags_a_nested_finding() {
+    // A nested field two levels inside a hash-paired dict carries new_path with
+    // the outer index swapped and the suffix path unchanged.
+    let t1 = json!([{"id": 1, "meta": {"x": 1}}, "anchorA", "anchorB", "anchorC"]);
+    let t2 = json!(["anchorA", "anchorB", "anchorC", {"id": 1, "meta": {"x": 2}}]);
+    assert_eq!(
+        ignore_order_diff(&t1, &t2),
+        json!({
+            "values_changed": {"root[0]['meta']['x']": {
+                "new_value": 2, "old_value": 1, "new_path": "root[3]['meta']['x']",
+            }}
+        })
+    );
+}
+
+#[test]
+fn dictionary_item_added_nested_in_a_paired_container_has_no_new_path() {
+    // Added/removed categories never carry a second path field, even under index drift.
+    let t1 = json!([{"id": 1, "meta": {"x": 1}}, "anchorA", "anchorB", "anchorC"]);
+    let t2 = json!(["anchorA", "anchorB", "anchorC", {"id": 1, "meta": {"x": 1}, "extra": 9}]);
+    assert_eq!(
+        ignore_order_diff(&t1, &t2),
+        json!({"dictionary_item_added": {"root[0]['extra']": 9}})
+    );
+}
+
+#[test]
+fn type_change_under_ignore_order_pairing() {
+    // [1, "2", 3.0] vs [3.0, 2, "1"]: the numeric pair 1<->2 gets paired
+    // (values_changed); "2"/"1" and any cross-type candidates (structural
+    // distance 0.5 >= 0.3 cutoff) are left as separate add/remove.
+    let result = ignore_order_diff(&json!([1, "2", 3.0]), &json!([3.0, 2, "1"]));
+    let changed = &result["values_changed"];
+    assert_eq!(changed["root[0]"]["old_value"], json!(1));
+    assert_eq!(changed["root[0]"]["new_value"], json!(2));
+}
+
+#[test]
+fn int_vs_float_single_element_pairs_and_type_changes() {
+    // Unlike the ordered LCS path's [1] vs [1.0] (Python == matching, reports
+    // nothing), ignore_order hashes 1 and 1.0 as different keys (type-tagged), so
+    // the recursive diff between them reports a type_changes.
+    assert_eq!(
+        ignore_order_diff(&json!([1]), &json!([1.0])),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "int", "new_type": "float", "old_value": 1, "new_value": 1.0,
+        }}})
+    );
+}
+
+#[test]
+fn list_in_dict_in_list_recurses_ignore_order_at_every_level() {
+    let t1 = json!([{"tags": ["x", "y", "z"]}, "anchor"]);
+    let t2 = json!(["anchor", {"tags": ["z", "y", "x"]}]);
+    assert_eq!(ignore_order_diff(&t1, &t2), json!({}));
+}
+
+#[test]
+fn equal_inputs_of_any_shape_are_empty() {
+    assert_eq!(ignore_order_diff(&json!(null), &json!(null)), json!({}));
+    assert_eq!(ignore_order_diff(&json!([]), &json!([])), json!({}));
+    assert_eq!(ignore_order_diff(&json!([1]), &json!([1])), json!({}));
+}
+
+#[test]
+fn max_depth_exceeded_on_an_over_budget_item_is_a_clean_error() {
+    let mut deep = json!(1);
+    for _ in 0..10 {
+        deep = json!([deep]);
+    }
+    let err = diff_with_options(
+        &json!([0]),
+        &json!([deep]),
+        &DiffOptions {
+            max_depth: 3,
+            ignore_order: true,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, crate::error::Error::MaxDepthExceeded { .. }));
+}
+
+#[test]
+fn max_depth_boundary_is_exact_for_an_item_on_the_a_side() {
+    // max_depth=2, list itself at depth 0, so its items are checked at
+    // depth+1=1: budget = 2-1 = 1. {"a":{"b":1}} has nesting 2 (> the budget of
+    // 1), so this must fail: the "a"-side pre-pass loop (deep item in `a`,
+    // shallow in `b`).
+    let err = diff_with_options(
+        &json!([{"a": {"b": 1}}]),
+        &json!([0]),
+        &DiffOptions {
+            max_depth: 2,
+            ignore_order: true,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, crate::error::Error::MaxDepthExceeded { .. }));
+}
+
+#[test]
+fn max_depth_boundary_is_exact_for_an_item_on_the_b_side() {
+    // Same boundary as above, mirrored onto the "b"-side pre-pass loop.
+    let err = diff_with_options(
+        &json!([0]),
+        &json!([{"a": {"b": 1}}]),
+        &DiffOptions {
+            max_depth: 2,
+            ignore_order: true,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, crate::error::Error::MaxDepthExceeded { .. }));
+}
+
+#[test]
+fn get_pairs_gate_ratio_uses_the_sum_of_added_and_removed_not_their_product() {
+    // 4 fully-disjoint removed items, 1 fully-disjoint added item:
+    // sum=5, denominator=4+1+1=6, ratio=5/6=0.833 > 0.7 -> get_pairs
+    // FALSE (raw add/remove, then the path-collision merge at root[0]).
+    assert_eq!(
+        ignore_order_diff(&json!([1, 2, 3, 4]), &json!([100])),
+        json!({
+            "values_changed": {"root[0]": {"new_value": 100, "old_value": 1}},
+            "iterable_item_removed": {"root[1]": 2, "root[2]": 3, "root[3]": 4},
+        })
+    );
+}
+
+#[test]
+fn paired_recursion_depth_boundary_is_exact() {
+    // A single unambiguous pair ({"a":{"b":1}} <-> {"a":{"b":9}}, both at their
+    // own list index) whose difference sits 2 dict levels down, with
+    // max_depth=2.
+    let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
+    let mut a = anchors.clone();
+    a.push(json!({"a": {"b": 1}}));
+    let mut b = anchors;
+    b.push(json!({"a": {"b": 9}}));
+
+    let err = diff_with_options(
+        &json!(a),
+        &json!(b),
+        &DiffOptions {
+            max_depth: 2,
+            ignore_order: true,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, crate::error::Error::MaxDepthExceeded { .. }));
+}
+
+#[test]
+fn item_key_handles_a_u64_beyond_i64_range() {
+    // Large ints round-trip through hashing/matching (Python ints are bignums).
+    let a = json!([1, 18_446_744_073_709_551_615u64]);
+    let b = json!([18_446_744_073_709_551_615u64, 1]);
+    assert_eq!(ignore_order_diff(&a, &b), json!({}));
+}
+
+#[test]
+fn item_key_distinguishes_arbitrary_precision_integers() {
+    use crate::value::Number;
+
+    let big = |s: &str| CValue::Number(Number::from_bigint(s.parse().expect("integer")));
+    let memo = IgnoreOrderMemo::new();
+    let k = |v: &CValue| super::hash::item_key(v, &memo);
+
+    // A big int fitting i128 keys as `Int`; one beyond i128 as `BigInt`. Two
+    // equal big ints share a key; different ones do not; and neither collides
+    // with a small int or an equal-valued float (numbers stay type-distinct
+    // under DeepHash — see `hash::ItemKey`'s doc).
+    let two_pow_100 = "1267650600228229401496703205376";
+    let beyond_i128 = "1".to_string() + &"0".repeat(40);
+    assert_eq!(k(&big(two_pow_100)), k(&big(two_pow_100)));
+    assert_ne!(
+        k(&big(two_pow_100)),
+        k(&big("1267650600228229401496703205377"))
+    );
+    assert_ne!(k(&big(two_pow_100)), k(&big(&beyond_i128)));
+    assert_ne!(k(&big(two_pow_100)), k(&cv(&json!(1))));
+    assert_ne!(
+        k(&big(two_pow_100)),
+        k(&CValue::Number(Number::from_f64(2f64.powi(100)))),
+    );
+
+    // Hashing a beyond-i128 `ItemKey::BigInt` agrees with its equality: the
+    // same value re-inserts as a duplicate, a different one as a new entry.
+    let mut seen = std::collections::HashSet::new();
+    assert!(seen.insert(k(&big(&beyond_i128))));
+    assert!(!seen.insert(k(&big(&beyond_i128))));
+    assert!(seen.insert(k(&big(two_pow_100))));
+}
+
+#[test]
+fn numeric_pairing_at_two_distances_reuses_the_used_check_across_buckets() {
+    // "5" (added) has candidates at two distinct distances: "4" (closer) and
+    // "100" (farther, still under the 0.3 cutoff). It pairs with the closer one
+    // first; when its farther-distance bucket entry is later popped, `used`
+    // already contains it. "100" is left as an unpaired removal.
+    let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
+    let mut a = anchors.clone();
+    a.push(json!(4));
+    a.push(json!(100));
+    let mut b = anchors;
+    b.push(json!(5));
+
+    assert_eq!(
+        ignore_order_diff(&json!(a), &json!(b)),
+        json!({
+            "values_changed": {"root[10]": {"new_value": 5, "old_value": 4}},
+            "iterable_item_removed": {"root[11]": 100},
+        })
+    );
+}
+
+#[test]
+fn distance_pairing_tie_between_two_records_favors_the_earliest_t1_index() {
+    // Worked structural-distance tie example:
+    // {"a":1,"b":1}->{"a":1,"b":3} and {"a":1,"b":2}->{"a":1,"b":3} both
+    // measure the SAME distance (0.1) — diff_length only counts how
+    // many fields differ, not the magnitude of the change. DeepDiff's
+    // asymmetric tie-break makes the EARLIEST t1 index win.
+    let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
+    let mut a = anchors.clone();
+    a.push(json!({"a": 1, "b": 1})); // root[10] — earliest, should win the pairing
+    a.push(json!({"a": 1, "b": 2})); // root[11] — should be left as a raw removal
+    let mut b = anchors;
+    b.push(json!({"a": 1, "b": 3}));
+
+    assert_eq!(
+        ignore_order_diff(&json!(a), &json!(b)),
+        json!({
+            "values_changed": {"root[10]['b']": {"new_value": 3, "old_value": 1}},
+            "iterable_item_removed": {"root[11]": {"a": 1, "b": 2}},
+        })
+    );
+}
+
+#[test]
+fn structural_distance_of_zero_leaves_pairs_unconditionally() {
+    // Single candidate on each side, differing only by an added key
+    // whose value is null (item_length(null) == 0), so diff_length ==
+    // 0 exactly (rough_distance's own early-return branch).
+    let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
+    let mut a = anchors.clone();
+    a.push(json!({"a": 1}));
+    let mut b = anchors;
+    b.push(json!({"a": 1, "b": null}));
+
+    let result = ignore_order_diff(&json!(a), &json!(b));
+    assert_eq!(
+        result["dictionary_item_added"]["root[10]['b']"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn structural_pairing_of_records_with_null_bool_and_nested_list_fields() {
+    // A single, unambiguous record pair exercising count_diff_leaves's
+    // Null/Bool match arms and count_object_diff_leaves's
+    // removed/added-key branches, plus a nested list field routed
+    // through count_array_diff_leaves — all inside one real distance
+    // computation (not called directly, unlike the white-box test
+    // above), to prove the wiring end to end.
+    let anchors: Vec<serde_json::Value> = (0..10).map(|i| json!(format!("anchor{i}"))).collect();
+    let mut a = anchors.clone();
+    a.push(json!({"id": 1, "meta": null, "flag": true, "note": "x", "tags": [1, 2]}));
+    let mut b = anchors;
+    b.push(json!({"id": 1, "meta": null, "flag": false, "extra": 5, "tags": [1, 2, 3]}));
+
+    let result = ignore_order_diff(&json!(a), &json!(b));
+    assert!(result.get("values_changed").is_some());
+}
+
+#[test]
+fn ignore_order_is_a_no_op_on_dict_comparison_itself() {
+    // Dicts are never affected by ignore_order — only
+    // list-typed VALUES inside them, recursively. The shared "z" key keeps
+    // key overlap above the threshold_to_diff_deeper cutoff so this
+    // exercises the normal per-key add/remove path rather than a
+    // wholesale collapse.
+    assert_eq!(
+        ignore_order_diff(&json!({"a": 1, "z": 9}), &json!({"b": 1, "z": 9})),
+        json!({
+            "dictionary_item_added": {"root['b']": 1},
+            "dictionary_item_removed": {"root['a']": 1},
+        })
+    );
+}
+
+use super::distance::{
+    Distance, THRESHOLD_TO_DIFF_DEEPER, is_length_excluded_key, numeric_distance,
+};
+use super::fxhash::{FX_SEED, FxHasher};
+use super::pairing::CUTOFF_DISTANCE_FOR_PAIRS;
+
+// --- Distance -----------------------------------------------------
+
+#[test]
+fn distance_partial_cmp_and_eq_and_hash_are_consistent() {
+    use std::cmp::Ordering;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let a = Distance(0.1);
+    let b = Distance(0.1);
+    let c = Distance(0.2);
+
+    assert_eq!(a, b);
+    assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+    assert_eq!(a.partial_cmp(&c), Some(Ordering::Less));
+    assert_eq!(c.partial_cmp(&a), Some(Ordering::Greater));
+
+    let hash_of = |d: Distance| {
+        let mut hasher = DefaultHasher::new();
+        d.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_eq!(hash_of(a), hash_of(b));
+
+    assert_ne!(a, c);
+    assert_ne!(hash_of(a), hash_of(c));
+}
+
+/// `FxHasher` (this module's own hasher, replacing the standard
+/// library's default for perf — see its doc) must actually depend on
+/// its input: two different byte sequences of the exact shapes this
+/// module hashes through (`ItemKey`'s `write_u8` discriminant tag, an
+/// `i128` `write_u128`, and a UTF-8 string via `write`) must not all
+/// collapse to the same hash.
+#[test]
+fn fx_hasher_output_depends_on_its_input() {
+    use std::hash::Hasher;
+
+    let hash_u8 = |v: u8| {
+        let mut h = FxHasher::default();
+        h.write_u8(v);
+        h.finish()
+    };
+    assert_ne!(hash_u8(1), hash_u8(2));
+
+    let hash_u16 = |v: u16| {
+        let mut h = FxHasher::default();
+        h.write_u16(v);
+        h.finish()
+    };
+    assert_ne!(hash_u16(1), hash_u16(2));
+
+    let hash_u32 = |v: u32| {
+        let mut h = FxHasher::default();
+        h.write_u32(v);
+        h.finish()
+    };
+    assert_ne!(hash_u32(1), hash_u32(2));
+
+    let hash_u64 = |v: u64| {
+        let mut h = FxHasher::default();
+        h.write_u64(v);
+        h.finish()
+    };
+    assert_ne!(hash_u64(1), hash_u64(2));
+
+    let hash_usize = |v: usize| {
+        let mut h = FxHasher::default();
+        h.write_usize(v);
+        h.finish()
+    };
+    assert_ne!(hash_usize(1), hash_usize(2));
+
+    let hash_u128 = |v: u128| {
+        let mut h = FxHasher::default();
+        h.write_u128(v);
+        h.finish()
+    };
+    assert_ne!(hash_u128(1), hash_u128(2));
+    // The high 64 bits must be mixed in, not discarded.
+    assert_ne!(hash_u128(1 << 64), hash_u128(0));
+
+    let hash_bytes = |s: &str| {
+        let mut h = FxHasher::default();
+        h.write(s.as_bytes());
+        h.finish()
+    };
+    // A 9-byte string exercises write()'s 8-byte-chunk loop plus its
+    // one-byte tail in a single call.
+    assert_ne!(hash_bytes("abcdefghi"), hash_bytes("abcdefghz"));
+    assert_ne!(hash_bytes("short"), hash_bytes(""));
+}
+
+#[test]
+fn fx_hasher_mixing_step_is_xor_not_or() {
+    // `1_u64.rotate_left(5) == 32`, and the word chosen below is also `32`:
+    // `32^32=0`, `32|32=32`, `32&32=32`. Computed directly against the
+    // documented formula `(hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED)`.
+    assert_eq!(1_u64.rotate_left(5), 32);
+    let mut h = FxHasher { hash: 1 };
+    h.add_to_hash(32);
+    let expected = (1_u64.rotate_left(5) ^ 32).wrapping_mul(FX_SEED);
+    assert_eq!(h.hash, expected);
+    assert_eq!(expected, 0, "1.rotate_left(5) ^ 32 == 32 ^ 32 == 0");
+}
+
+// --- count_array_diff_leaves ---------------------------------------
+
+#[test]
+fn count_array_diff_leaves_sums_every_report_category_via_the_ordered_path() {
+    // A dict element disqualifies LCS matching, forcing the plain
+    // positional path — direct control over which finding categories
+    // the trial sub-diff produces, to exercise
+    // Report::distance_leaf_length's full range in one shot:
+    // type_changes (index 0), a nested values_changed +
+    // dictionary_item_added/removed (index 1), a top-level
+    // values_changed (index 2), and an iterable_item_removed (a's
+    // surplus tail).
+    let opts = DiffOptions {
+        ignore_order: false,
+        ..DiffOptions::default()
+    };
+    let a = vec![
+        json!(1),
+        json!({"x": 1, "y": 2}),
+        json!("removed_str"),
+        json!("tail_removed"),
+    ];
+    let b = vec![json!(1.5), json!({"x": 2, "z": 9}), json!("added_str")];
+
+    // type_changes(index 0) = 1 + item_length(1.5) = 2;
+    // index 1's dict diff = values_changed(1) + removed "y"(1) + added "z"(1) = 3;
+    // index 2 values_changed = item_length("added_str") = 1;
+    // a's surplus tail (index 3) iterable_item_removed = item_length("tail_removed") = 1.
+    // Total = 2 + 3 + 1 + 1 = 7.
+    assert_eq!(count_array_diff_leaves(&a, &b, 0, &opts), 7);
+}
+
+#[test]
+fn count_array_diff_leaves_of_equal_arrays_is_zero() {
+    let opts = DiffOptions::default();
+    assert_eq!(
+        count_array_diff_leaves(&[json!(1)], &[json!(1)], 0, &opts),
+        0
+    );
+}
+
+// --- count_diff_leaves / count_object_diff_leaves -------------------
+
+#[test]
+fn count_diff_leaves_number_type_mismatch_uses_type_change_leaf_length() {
+    let opts = DiffOptions::default();
+    // int -> float mismatch: type_change_leaf_length(1, 1.5) = 1 + item_length(1.5) = 2
+    // (float(1) == 1.0 != 1.5, so new_value is NOT omitted).
+    assert_eq!(count_diff_leaves(&json!(1), &json!(1.5), 0, &opts), 2);
+}
+
+#[test]
+fn type_change_leaf_length_omits_new_value_when_the_coercion_reproduces_it() {
+    // float(0) == 0.0 -> omitted (flat 1, just the new_type).
+    assert_eq!(type_change_leaf_length(&json!(0), &json!(0.0)), 1);
+    // float(2) == 2.0 != 1.0 -> NOT omitted.
+    assert_eq!(type_change_leaf_length(&json!(2), &json!(1.0)), 2);
+    // int(1.9) == 1 (truncates toward zero) -> omitted.
+    assert_eq!(type_change_leaf_length(&json!(1.9), &json!(1)), 1);
+    // int(1.5) == 1 != 2 -> NOT omitted.
+    assert_eq!(type_change_leaf_length(&json!(1.5), &json!(2)), 2);
+    // bool(5) == True -> omitted.
+    assert_eq!(type_change_leaf_length(&json!(5), &json!(true)), 1);
+    // bool(0) == False -> omitted.
+    assert_eq!(type_change_leaf_length(&json!(0), &json!(false)), 1);
+    // int(True) == 1 -> omitted.
+    assert_eq!(type_change_leaf_length(&json!(true), &json!(1)), 1);
+    // int(True) == 1 != 2 -> NOT omitted.
+    assert_eq!(type_change_leaf_length(&json!(true), &json!(2)), 2);
+    // str(True) == "True" -> omitted.
+    assert_eq!(type_change_leaf_length(&json!(true), &json!("True")), 1);
+    // str(True) == "True" != "true" -> NOT omitted.
+    assert_eq!(type_change_leaf_length(&json!(true), &json!("true")), 2);
+    // int("5") == 5 -> omitted.
+    assert_eq!(type_change_leaf_length(&json!("5"), &json!(5)), 1);
+    // int("abc") raises -> always included (a container/coercion-failure
+    // case is not omitted, matching Python's `except Exception: pass`).
+    assert_eq!(type_change_leaf_length(&json!("abc"), &json!(5)), 2);
+    // bool(None) == False -> omitted.
+    assert_eq!(
+        type_change_leaf_length(&serde_json::Value::Null, &json!(false)),
+        1
+    );
+    // str(None) == "None" -> omitted.
+    assert_eq!(
+        type_change_leaf_length(&serde_json::Value::Null, &json!("None")),
+        1
+    );
+    // dict(5) has no known coercion -> always included.
+    assert_eq!(type_change_leaf_length(&json!(5), &json!({"a": 1})), 1 + 1);
+    // bool([]) == False / bool([1]) == True -> both omitted (container
+    // truthiness, matching Python's own `bool()` semantics).
+    assert_eq!(type_change_leaf_length(&json!([]), &json!(false)), 1);
+    assert_eq!(type_change_leaf_length(&json!([1]), &json!(true)), 1);
+    assert_eq!(type_change_leaf_length(&json!({}), &json!(false)), 1);
+    assert_eq!(type_change_leaf_length(&json!({"a": 1}), &json!(true)), 1);
+    // A huge u64-only integer (beyond i64::MAX) coerced to bool/str:
+    // still exercises the u64-specific branches directly.
+    assert_eq!(
+        type_change_leaf_length(&json!(18_446_744_073_709_551_615u64), &json!(true)),
+        1
+    );
+    assert_eq!(
+        type_change_leaf_length(
+            &json!(18_446_744_073_709_551_615u64),
+            &json!("18446744073709551615")
+        ),
+        1
+    );
+    // A float grossly out of i64 range never coerces to int -> always
+    // included.
+    assert_eq!(type_change_leaf_length(&json!(1e300), &json!(5)), 2);
+    // Same, pinned against `i64::MAX`/`i64::MIN` specifically.
+    assert_eq!(type_change_leaf_length(&json!(1e300), &json!(i64::MAX)), 2);
+    assert_eq!(type_change_leaf_length(&json!(-1e300), &json!(i64::MIN)), 2);
+    // int(5) == 5.0 -> omitted (a non-zero value, unlike the `0`/`0.0` cases above).
+    assert_eq!(type_change_leaf_length(&json!(5), &json!(5.0)), 1);
+    // bool("") == False / bool("x") == True -> both omitted (string truthiness).
+    assert_eq!(type_change_leaf_length(&json!(""), &json!(false)), 1);
+    assert_eq!(type_change_leaf_length(&json!("x"), &json!(true)), 1);
+    // bool("x") == True != False -> NOT omitted.
+    assert_eq!(type_change_leaf_length(&json!("x"), &json!(false)), 2);
+    // str(5.5) == "5.5" -> omitted: the rendered float already contains a `.`,
+    // so no trailing `.0` is appended.
+    assert_eq!(type_change_leaf_length(&json!(5.5), &json!("5.5")), 1);
+    // str(5.5) == "5.5" != "5.5.0" -> NOT omitted.
+    assert_eq!(type_change_leaf_length(&json!(5.5), &json!("5.5.0")), 2);
+}
+
+#[test]
+fn ignore_order_pairing_applies_the_general_coercion_rule_to_a_nested_type_change() {
+    // A structural pair whose distance depends on the general coercion rule
+    // (float(0) == 0.0). Distance 0.25 < 0.3: pairs, recursing to a nested type_changes.
+    let a = json!([[["", ""], []], {}]);
+    let b = json!([[1, [], true, {"c": true}], {}]);
+    assert_eq!(
+        ignore_order_diff(&a, &b),
+        json!({
+            "iterable_item_added": {"root[0][0]": 1, "root[0][3]": {"c": true}},
+            "type_changes": {"root[0][0]": {
+                "new_path": "root[0][2]",
+                "new_type": "bool",
+                "new_value": true,
+                "old_type": "list",
+                "old_value": ["", ""],
+            }},
+        })
+    );
+}
+
+#[test]
+fn ignore_order_pairing_omits_new_value_when_float_of_old_equals_new() {
+    // `[[0]]` vs `[[0.0]]` recurses to a nested type_changes
+    // (float(0) == 0.0, new_value omitted).
+    let a = json!([[0]]);
+    let b = json!([[0.0]]);
+    assert_eq!(
+        ignore_order_diff(&a, &b),
+        json!({
+            "type_changes": {"root[0][0]": {
+                "new_type": "float", "new_value": 0.0, "old_type": "int", "old_value": 0,
+            }},
+        })
+    );
+}
+
+#[test]
+fn ignore_order_pairing_is_not_corrupted_by_a_nested_low_overlap_dict_pair() {
+    // A nested low-overlap dict pair collapses inside the trial sub-diff, so its
+    // distance (0.136) stays under the cutoff and `1`<->`2`, `[{aa,bb,cc}]`<->`[{}]` pair.
+    let a = json!(["y", 1, [{"aa": 1, "bb": 2, "cc": 3}]]);
+    let b = json!(["y", 0.0, 2, [{}]]);
+    assert_eq!(
+        ignore_order_diff(&a, &b),
+        json!({
+            "iterable_item_added": {"root[1]": 0.0},
+            "values_changed": {
+                "root[1]": {
+                    "new_path": "root[2]", "new_value": 2, "old_value": 1,
+                },
+                "root[2][0]": {
+                    "new_path": "root[3][0]",
+                    "new_value": {},
+                    "old_value": {"aa": 1, "bb": 2, "cc": 3},
+                },
+            },
+        })
+    );
+}
+
+#[test]
+fn count_diff_leaves_same_type_numbers_equal_is_zero_unequal_is_one() {
+    let opts = DiffOptions::default();
+    assert_eq!(count_diff_leaves(&json!(5), &json!(5), 0, &opts), 0);
+    assert_eq!(count_diff_leaves(&json!(5), &json!(6), 0, &opts), 1);
+    assert_eq!(count_diff_leaves(&json!(5.0), &json!(5.0), 0, &opts), 0);
+    assert_eq!(count_diff_leaves(&json!(5.0), &json!(6.0), 0, &opts), 1);
+}
+
+#[test]
+fn count_diff_leaves_null_null_is_zero() {
+    let opts = DiffOptions::default();
+    assert_eq!(
+        count_diff_leaves(&serde_json::Value::Null, &serde_json::Value::Null, 0, &opts),
+        0
+    );
+}
+
+#[test]
+fn count_diff_leaves_bool_equal_is_zero_unequal_is_one() {
+    let opts = DiffOptions::default();
+    assert_eq!(count_diff_leaves(&json!(true), &json!(true), 0, &opts), 0);
+    assert_eq!(count_diff_leaves(&json!(true), &json!(false), 0, &opts), 1);
+}
+
+#[test]
+fn count_diff_leaves_string_equal_is_zero_unequal_is_one() {
+    let opts = DiffOptions::default();
+    assert_eq!(count_diff_leaves(&json!("a"), &json!("a"), 0, &opts), 0);
+    assert_eq!(count_diff_leaves(&json!("a"), &json!("b"), 0, &opts), 1);
+}
+
+#[test]
+fn count_diff_leaves_array_dispatches_to_count_array_diff_leaves() {
+    let opts = DiffOptions::default();
+    // Ordered path (default opts): index-aligned, one values_changed
+    // (new_value=3, item_length=1).
+    assert_eq!(
+        count_diff_leaves(&json!([1, 2]), &json!([1, 3]), 0, &opts),
+        1
+    );
+}
+
+#[test]
+fn count_object_diff_leaves_below_threshold_collapses_to_a_wholesale_new_value() {
+    let opts = DiffOptions::default();
+    let a = json!({"a": 1, "c": 2}).as_object().unwrap().clone();
+    let b = json!({"b": 1, "d": 2}).as_object().unwrap().clone();
+    // union={a,b,c,d}=4, intersect={}=0, ratio=0 < 0.33 -> collapses to
+    // item_length_of_map(b) = item_length(1) + item_length(2) = 2.
+    assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 2);
+}
+
+#[test]
+fn count_object_diff_leaves_ratio_uses_division_not_multiplication() {
+    let opts = DiffOptions::default();
+    // intersect=1 ("shared"), union=4 -> ratio 1/4=0.25 < 0.33 (collapses):
+    // item_length_of_map(b) = item_length(9) + item_length(3) + item_length(4) = 3.
+    let a = json!({"shared": 1, "x": 2}).as_object().unwrap().clone();
+    let b = json!({"shared": 9, "y": 3, "z": 4})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 3);
+}
+
+#[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "asserting the runtime division is bit-identical to the compile-time literal is the test's own point"
+)]
+fn count_object_diff_leaves_ratio_at_exactly_the_threshold_does_not_collapse() {
+    // A ⊇ B: 100 keys in `a` (33 shared with `b`, 67 exclusive to `a`), 33 keys
+    // in `b` (all shared). union = 100, intersect = 33, ratio = 33.0/100.0,
+    // bit-identical to the `0.33` literal, so `< 0.33` is false (no collapse).
+    let mut a = serde_json::Map::new();
+    let mut b = serde_json::Map::new();
+    for i in 0..33 {
+        a.insert(format!("shared{i}"), json!(1));
+        b.insert(format!("shared{i}"), json!(1));
+    }
+    for i in 0..67 {
+        a.insert(format!("only_a{i}"), json!(2));
+    }
+    assert_eq!(33.0_f64 / 100.0_f64, THRESHOLD_TO_DIFF_DEEPER);
+
+    // No collapse -> every shared key recurses (all equal, 0 each) and
+    // every `a`-only key is a removed leaf (item_length(2) = 1 each,
+    // 67 of them) = 67, not item_length_of_map(b) = 33 (all `1`s).
+    assert_eq!(
+        count_object_diff_leaves(&a, &b, 0, &DiffOptions::default()),
+        67
+    );
+}
+
+#[test]
+fn mixed_key_union_sums_shared_and_one_sided_keys() {
+    // Three Python-equal shared keys (`1` matches `1.0`) and three one-sided keys per side:
+    // 3 / 9 is the threshold itself, so no collapse; a product of any two counts collapses.
+    let object = |keys: [serde_json::Value; 6]| {
+        crate::value::Object::from_pairs(
+            keys.iter()
+                .map(|key| (ObjectKey::Other(Box::new(cv(key))), cv(&json!(0))))
+                .collect(),
+        )
+    };
+    let a = object([
+        json!(1),
+        json!(2),
+        json!(3),
+        json!(10),
+        json!(11),
+        json!(12),
+    ]);
+    let b = object([
+        json!(1.0),
+        json!(2),
+        json!(3),
+        json!(20),
+        json!(21),
+        json!(22),
+    ]);
+    assert!(!super::is_below_threshold_to_diff_deeper(&a, &b));
+}
+
+fn max_depth_exceeded(path: &str, max_depth: usize) -> crate::error::Error {
+    crate::error::Error::MaxDepthExceeded {
+        path: path.to_string(),
+        max_depth,
+    }
+}
+
+#[test]
+fn count_object_diff_leaves_shared_key_recursion_depth_boundary_is_exact() {
+    // "x"'s trial reaches the leaf at depth 4: key, array item, "a", "b".
+    let a = json!({"x": [{"a": {"b": 1}}]}).as_object().unwrap().clone();
+    let b = json!({"x": [{"a": {"b": 9}}]}).as_object().unwrap().clone();
+    let count = |max_depth| {
+        super::distance::count_object_diff_leaves(
+            &cobj(&a),
+            &cobj(&b),
+            0,
+            &DiffOptions {
+                max_depth,
+                ignore_order: false,
+            },
+            &IgnoreOrderMemo::new(),
+        )
+    };
+    assert_eq!(
+        (count(3), count(4)),
+        (
+            Err(Box::new(max_depth_exceeded("root['x'][0]['a']['b']", 3))),
+            Ok(1)
+        )
+    );
+}
+
+#[test]
+fn count_object_diff_leaves_at_or_above_threshold_recurses_normally() {
+    let opts = DiffOptions::default();
+    // Full key overlap (ratio 1.0, well above 0.33): must recurse key-by-key,
+    // not collapse.
+    let a = json!({"a": 1, "b": 2}).as_object().unwrap().clone();
+    let b = json!({"a": 1, "b": 3}).as_object().unwrap().clone();
+    // Shared "a" equal (0) + shared "b" differs (1) = 1, not
+    // item_length_of_map(b) = 1 + 3 = 4.
+    assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 1);
+}
+
+#[test]
+fn count_object_diff_leaves_union_len_one_never_collapses() {
+    let opts = DiffOptions::default();
+    // union_len == 1 (the `> 1` boundary): must never collapse regardless of
+    // the (zero) intersection.
+    let a = json!({"a": 1}).as_object().unwrap().clone();
+    let b = serde_json::Map::new();
+    // Removed-only "a": item_length(1) = 1, not item_length_of_map({}) = 0.
+    assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 1);
+}
+
+#[test]
+fn count_object_diff_leaves_accumulates_distinct_contributions_by_addition() {
+    let opts = DiffOptions::default();
+    // Three keys each contributing a DIFFERENT, non-0/1 leaf count: shared "a"
+    // differs by a nested list (item_length([1,2]) = 2), removed-only "b" is a
+    // 3-element list (item_length = 3), added-only "c" is a 4-element list
+    // (item_length = 4). Sum = 9.
+    let a = json!({"a": [9, 9], "b": [1, 2, 3]})
+        .as_object()
+        .unwrap()
+        .clone();
+    let b = json!({"a": [1, 2], "c": [1, 2, 3, 4]})
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(count_object_diff_leaves(&a, &b, 0, &opts), 2 + 3 + 4);
+}
+
+/// `count_object_diff_leaves_mixed` sums a shared key's changed-value cost
+/// with every removed-only and added-only key's own length.
+#[test]
+fn count_object_diff_leaves_mixed_sums_shared_added_and_removed_non_str_keys() {
+    let a = crate::value::Object::from_pairs(vec![
+        (
+            ObjectKey::Other(Box::new(cv(&json!(3)))),
+            cv(&json!([9, 9])),
+        ),
+        (
+            ObjectKey::Other(Box::new(cv(&json!(1)))),
+            cv(&json!([1, 2, 3])),
+        ),
+    ]);
+    let b = crate::value::Object::from_pairs(vec![
+        (
+            ObjectKey::Other(Box::new(cv(&json!(3)))),
+            cv(&json!([1, 2])),
+        ),
+        (
+            ObjectKey::Other(Box::new(cv(&json!(2)))),
+            cv(&json!([1, 2, 3, 4])),
+        ),
+    ]);
+
+    assert_eq!(
+        super::distance::count_object_diff_leaves(
+            &a,
+            &b,
+            0,
+            &DiffOptions::default(),
+            &super::IgnoreOrderMemo::new(),
+        )
+        .unwrap(),
+        2 + 3 + 4
+    );
+}
+
+#[test]
+fn count_object_diff_leaves_mixed_shared_key_recursion_depth_boundary_is_exact() {
+    let key = || ObjectKey::Other(Box::new(cv(&json!(5))));
+    let a = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 1}}])))]);
+    let b = crate::value::Object::from_pairs(vec![(key(), cv(&json!([{"a": {"b": 9}}])))]);
+    let count = |max_depth| {
+        let opts = DiffOptions {
+            max_depth,
+            ignore_order: false,
+        };
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new())
+    };
+    assert_eq!(
+        (count(3), count(4)),
+        (
+            Err(Box::new(max_depth_exceeded("root[5][0]['a']['b']", 3))),
+            Ok(1)
+        )
+    );
+}
+
+#[test]
+fn count_object_diff_leaves_walks_a_one_sided_non_str_key_pair_with_the_mixed_path() {
+    let x = || ObjectKey::Str(crate::value::Key::Utf8("x".into()));
+    let a = ccustom_entries(vec![(x(), cv(&json!([{"a": {"b": 1}}])))]);
+    let b = ccustom_entries(vec![
+        (x(), cv(&json!([{"a": {"b": 9}}]))),
+        (ObjectKey::Other(Box::new(cv(&json!(5)))), cv(&json!([1]))),
+    ]);
+    let opts = DiffOptions {
+        max_depth: 3,
+        ignore_order: false,
+    };
+    assert_eq!(
+        super::distance::count_object_diff_leaves(&a, &b, 0, &opts, &IgnoreOrderMemo::new()),
+        Err(Box::new(max_depth_exceeded("root['x'][0]['a']['b']", 3)))
+    );
+}
+
+/// `dict_python_eq_mixed` rejects a pair when either side has an extra key
+/// or a shared key's value differs, never just papering over one with another.
+#[test]
+fn dict_python_eq_mixed_rejects_when_only_one_side_has_an_extra_key_or_a_shared_value_differs() {
+    let leaves = super::distance::type_change_leaf_length;
+    let key = |n: i64| ObjectKey::Other(Box::new(cv(&json!(n))));
+    let dict =
+        |pairs: Vec<(ObjectKey, CValue)>| CValue::Object(crate::value::Object::from_pairs(pairs));
+    let list_of = |value: CValue| carr(vec![value]);
+    let tuple_of = |value: CValue| ctuple(vec![value]);
+
+    let base = || dict(vec![(key(1), cv(&json!("a")))]);
+    let with_extra_key = || dict(vec![(key(1), cv(&json!("a"))), (key(2), cv(&json!("b")))]);
+    let with_changed_value = || dict(vec![(key(1), cv(&json!("z")))]);
+
+    // `only_a` non-empty (a key present only on the list side): the first
+    // `&&` operand alone must fail the whole chain.
+    assert_ne!(
+        leaves(&list_of(with_extra_key()), &tuple_of(base())),
+        1,
+        "not reproduced: the list side has an extra key the tuple side never had"
+    );
+
+    // `only_b` non-empty: the second `&&` operand alone must fail the chain.
+    assert_ne!(
+        leaves(&list_of(base()), &tuple_of(with_extra_key())),
+        1,
+        "not reproduced: the tuple side has an extra key the list side never had"
+    );
+
+    // Same keys, a shared value differs: the third operand (`shared.all`)
+    // alone must fail the chain.
+    assert_ne!(
+        leaves(&list_of(base()), &tuple_of(with_changed_value())),
+        1,
+        "not reproduced: the shared key's value differs"
+    );
+}
+
+/// `python_eq`'s dict arm treats two dicts as equal across a Python-equal
+/// but differently-typed key (`1` vs `1.0`), matching real Python `==`.
+#[test]
+fn python_eq_matches_dicts_across_python_equal_but_differently_typed_keys() {
+    let dict_int = CValue::Object(crate::value::Object::from_pairs(vec![(
+        ObjectKey::Other(Box::new(cv(&json!(1)))),
+        cv(&json!("a")),
+    )]));
+    let dict_float = CValue::Object(crate::value::Object::from_pairs(vec![(
+        ObjectKey::Other(Box::new(cv(&json!(1.0)))),
+        cv(&json!("a")),
+    )]));
+
+    assert_eq!(
+        super::distance::type_change_leaf_length(&carr(vec![dict_int]), &ctuple(vec![dict_float]),),
+        1,
+        "reproduced (cost 1): the two dicts are Python-equal despite the differently-typed key"
+    );
+}
+
+// --- item_key ---------------------------------------------------
+
+#[test]
+fn int_float_bool_never_share_a_key_even_at_equal_value() {
+    assert_ne!(item_key(&json!(1)), item_key(&json!(1.0)));
+    assert_ne!(item_key(&json!(1)), item_key(&json!(true)));
+    assert_ne!(item_key(&json!(1.0)), item_key(&json!(true)));
+    assert_ne!(item_key(&json!(0)), item_key(&json!(false)));
+}
+
+#[test]
+fn signed_zero_floats_share_a_key_but_stay_distinct_from_the_integer_zero() {
+    // Signed zeros share a key; an integral float stays distinct from the
+    // integer of the same value.
+    assert_eq!(item_key(&json!(0.0)), item_key(&json!(-0.0)));
+    assert_ne!(item_key(&json!(2.0)), item_key(&json!(2)));
+    assert_ne!(item_key(&json!(0.0)), item_key(&json!(0)));
+}
+
+#[test]
+fn signed_zero_floats_share_a_set_member_digest_too() {
+    // The same normalization, through `set_member_digest`'s own `number_key`:
+    // two otherwise-unrelated sets, each holding one signed zero, are the same set.
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
+    assert_eq!(key(&cv(&json!(0.0))), key(&cv(&json!(-0.0))));
+    assert_ne!(key(&cv(&json!(2.0))), key(&cv(&json!(2))));
+    // Two distinct nonzero floats must keep distinct keys.
+    assert_ne!(key(&cv(&json!(1.5))), key(&cv(&json!(2.5))));
+}
+
+#[test]
+fn signed_zero_floats_dedup_to_one_removal_under_ignore_order() {
+    assert_eq!(
+        ignore_order_diff(&json!([0.0, -0.0]), &json!([])),
+        json!({"iterable_item_removed": {"root[0]": 0.0}})
+    );
+}
+
+#[test]
+fn equal_ints_share_a_key_regardless_of_representation() {
+    assert_eq!(item_key(&json!(5)), item_key(&json!(5)));
+}
+
+#[test]
+fn nested_list_hashes_order_and_count_insensitively() {
+    assert_eq!(item_key(&json!([1, 2, 3])), item_key(&json!([3, 2, 1])));
+    assert_eq!(item_key(&json!([1, 1, 2])), item_key(&json!([1, 2, 2])));
+    assert_ne!(item_key(&json!([1, 2])), item_key(&json!([1, 2, 3])));
+}
+
+#[test]
+fn nested_dict_hashes_key_order_insensitively() {
+    assert_eq!(
+        item_key(&json!({"a": 1, "b": 2})),
+        item_key(&json!({"b": 2, "a": 1}))
+    );
+    assert_ne!(
+        item_key(&json!({"a": 1})),
+        item_key(&json!({"a": 1, "b": 2}))
+    );
+}
+
+#[test]
+fn different_strings_and_null_have_distinct_keys() {
+    assert_eq!(item_key(&json!("a")), item_key(&json!("a")));
+    assert_ne!(item_key(&json!("a")), item_key(&json!("b")));
+    assert_ne!(item_key(&serde_json::Value::Null), item_key(&json!("a")));
+    assert_eq!(
+        item_key(&serde_json::Value::Null),
+        item_key(&serde_json::Value::Null)
+    );
+}
+
+#[test]
+fn item_key_is_orderable_for_use_as_a_nested_set_element() {
+    // Exercises the Ord derive path a List/Dict key relies on
+    // (BTreeSet<ItemKey>/BTreeMap<String, ItemKey>) — a list containing
+    // dicts, nested inside another list, must hash without panicking.
+    let a = item_key(&json!([{"a": 1}, {"b": [1, 2]}]));
+    let b = item_key(&json!([{"b": [2, 1]}, {"a": 1}]));
+    assert_eq!(a, b);
+}
+
+// --- numeric_value / numeric_distance ----------------------------
+
+#[test]
+fn numeric_value_covers_bool_and_number_only() {
+    assert_eq!(numeric_value(&json!(true)), Some(1.0));
+    assert_eq!(numeric_value(&json!(false)), Some(0.0));
+    assert_eq!(numeric_value(&json!(3)), Some(3.0));
+    assert_eq!(numeric_value(&json!(3.5)), Some(3.5));
+    assert_eq!(numeric_value(&json!("3")), None);
+    assert_eq!(numeric_value(&serde_json::Value::Null), None);
+}
+
+#[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact output of our own deterministic arithmetic against literal expected constants"
+)]
+fn numeric_distance_of_equal_values_is_zero() {
+    assert_eq!(numeric_distance(5.0, 5.0, 0.3), 0.0);
+}
+
+#[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact output of our own deterministic arithmetic against literal expected constants"
+)]
+fn numeric_distance_opposite_sign_zero_sum_is_always_rejected() {
+    // divisor == 0.0 without num1 == num2: DeepDiff returns max_ itself
+    // (always >= cutoff, i.e. always rejected as a pairing candidate).
+    assert_eq!(numeric_distance(-5.0, 5.0, 0.3), 0.3);
+}
+
+#[test]
+#[allow(
+    clippy::float_cmp,
+    reason = "exact output of our own deterministic arithmetic against literal expected constants"
+)]
+fn numeric_distance_bool_vs_number_is_always_at_the_cutoff() {
+    // get_numeric_types_distance(0, True) == 0.3.
+    assert_eq!(numeric_distance(0.0, 1.0, 0.3), 0.3);
+}
+
+#[test]
+fn numeric_distance_matches_the_probed_n_equals_100_shape() {
+    // A worked pair: 251650 -> 2870137.
+    let d = numeric_distance(251_650.0, 2_870_137.0, 0.3);
+    assert!(
+        d < 0.3,
+        "expected an accepted (self-cancellation) candidate, got {d}"
+    );
+}
+
+// --- rough_distance -------------------------------------------------
+
+#[test]
+fn rough_distance_structural_formula_is_diff_length_over_summed_rough_lengths() {
+    let opts = DiffOptions::default();
+    // removed=[1,2] (rough_length=3), added=[1,2,3] (rough_length=4):
+    // diff_length=1 (one iterable_item_added, item_length(3)=1).
+    // distance = 1 / (3 + 4) = 1/7.
+    let removed = json!([1, 2]);
+    let added = json!([1, 2, 3]);
+    let d = super::distance::rough_distance(
+        &cv(&removed),
+        &cv(&added),
+        CUTOFF_DISTANCE_FOR_PAIRS,
+        0,
+        &opts,
+        &super::IgnoreOrderMemo::new(),
+    )
+    .unwrap();
+    assert!((d - 1.0 / 7.0).abs() < 1e-12, "expected 1/7, got {d}");
+}
+
+#[test]
+fn rough_distance_depth_boundary_is_exact() {
+    // The trial runs at the pairing list's own depth, 0, and reaches the
+    // leaf at depth 3: array item, "a", "b".
+    let distance = |max_depth| {
+        super::distance::rough_distance(
+            &cv(&json!([{"a": {"b": 1}}])),
+            &cv(&json!([{"a": {"b": 9}}])),
+            CUTOFF_DISTANCE_FOR_PAIRS,
+            0,
+            &DiffOptions {
+                max_depth,
+                ignore_order: false,
+            },
+            &IgnoreOrderMemo::new(),
+        )
+    };
+    assert_eq!(
+        (distance(2), distance(3)),
+        (
+            Err(Box::new(max_depth_exceeded("root[0]['a']['b']", 2))),
+            Ok(1.0 / 12.0)
+        )
+    );
+}
+
+/// A datetime whose UTC form leaves year 9999, and an in-range neighbour
+/// the nested pairing pairs it with.
+fn unnormalizable_and_near() -> (CValue, CValue) {
+    (
+        cdt_at(9999, 12, 31, 23, 0, 0, 0, Some(-3600)),
+        cdt_at(9999, 12, 31, 23, 59, 0, 0, None),
+    )
+}
+
+fn ignore_order_opts(max_depth: usize) -> DiffOptions {
+    DiffOptions {
+        ignore_order: true,
+        max_depth,
+    }
+}
+
+#[test]
+fn rough_distance_of_a_pair_whose_trial_compares_an_unnormalizable_datetime_is_its_error() {
+    let (extreme, near) = unnormalizable_and_near();
+    let record = |datetime| cdict_holding(carr(vec![datetime, cv(&json!("x")), cv(&json!("y"))]));
+    let distance = super::distance::rough_distance(
+        &record(extreme),
+        &record(near),
+        CUTOFF_DISTANCE_FOR_PAIRS,
+        0,
+        &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH),
+        &IgnoreOrderMemo::new(),
+    );
+    assert_eq!(
+        distance,
+        Err(Box::new(crate::error::Error::DateTimeOutOfRange {
+            path: "root['k'][0]".to_string()
+        }))
+    );
+}
+
+/// `a` holds a zero-distance candidate for `b`'s one added item ahead of a
+/// second candidate `failing`, which the pairing would leave unpaired.
+fn lists_with_a_failing_candidate(
+    zero_distance: CValue,
+    failing: CValue,
+    added: CValue,
+) -> (CValue, CValue) {
+    let shared = || vec![cv(&json!("s1")), cv(&json!("s2"))];
+    (
+        carr([vec![zero_distance, failing], shared()].concat()),
+        carr([vec![added], shared()].concat()),
+    )
+}
+
+#[test]
+fn a_dict_candidate_holding_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
+    let (extreme, near) = unnormalizable_and_near();
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", near.clone()), ("n", CValue::Null)]),
+        cdict_holding(extreme),
+        cdict_holding(near),
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH)),
+        Err(crate::error::Error::DateTimeOutOfRange {
+            path: "root[1]['k']".to_string()
+        })
+    );
+}
+
+fn sub() -> std::sync::Arc<str> {
+    std::sync::Arc::from("Sub")
+}
+
+fn csub_datetime(value: &CValue) -> CValue {
+    let CValue::DateTime(datetime) = value else {
+        panic!("csub_datetime wraps a datetime")
+    };
+    CValue::DateTime(crate::value::Typed::with_class_name(
+        datetime.value(),
+        Some(sub()),
+    ))
+}
+
+fn mirror_and_report(a: &CValue, b: &CValue) -> [Result<usize, Box<crate::error::Error>>; 2] {
+    let opts = ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH);
+    [
+        super::distance::count_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()),
+        crate::diff::diff_with_options(a, b, &opts)
+            .map(|report| report.distance_leaf_length())
+            .map_err(Box::new),
+    ]
+}
+
+#[test]
+fn an_unnormalizable_datetime_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let (extreme, near) = unnormalizable_and_near();
+    assert_eq!(
+        mirror_and_report(&csub_datetime(&extreme), &near),
+        [Ok(2), Ok(2)]
+    );
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", near.clone()), ("n", CValue::Null)]),
+        cdict_holding(csub_datetime(&extreme)),
+        cdict_holding(near),
+    );
+    assert!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_same_instant_datetime_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let (_, near) = unnormalizable_and_near();
+    assert_eq!(
+        mirror_and_report(&csub_datetime(&near), &near),
+        [Ok(2), Ok(2)]
+    );
+}
+
+#[test]
+fn a_date_time_or_timedelta_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let date = cdate(2024, 1, 1);
+    let time = ctime(10, 0, 0, 0, None);
+    let delta = ctimedelta(1, 0, 0);
+    let (CValue::Date(d), CValue::Time(t), CValue::TimeDelta(td)) = (&date, &time, &delta) else {
+        panic!("the builders return their own variants")
+    };
+    for (subclass, base) in [
+        (
+            CValue::Date(crate::value::Typed::with_class_name(d.value(), Some(sub()))),
+            &date,
+        ),
+        (
+            CValue::Time(crate::value::Typed::with_class_name(t.value(), Some(sub()))),
+            &time,
+        ),
+        (
+            CValue::TimeDelta(crate::value::Typed::with_class_name(
+                td.value(),
+                Some(sub()),
+            )),
+            &delta,
+        ),
+    ] {
+        assert_eq!(mirror_and_report(&subclass, base), [Ok(2), Ok(2)]);
+    }
+}
+
+/// `[datetime, "x"]` as a list or a tuple, of the subclass `Sub` or not.
+fn sequence_holding(datetime: &CValue, tuple: bool, class: Option<std::sync::Arc<str>>) -> CValue {
+    let items = crate::value::Typed::with_class_name(
+        vec![datetime.clone(), cv(&json!("x"))].into_boxed_slice(),
+        class,
+    );
+    if tuple {
+        CValue::Tuple(items)
+    } else {
+        CValue::Array(items)
+    }
+}
+
+/// Asserts the mirror and the report agree on a `Sub` sequence holding an
+/// unnormalizable datetime against a plain one, bare and as the losing
+/// candidate of a list, where the diff reports it removed.
+fn assert_sequence_of_another_class_is_a_type_change(tuple: bool) {
+    let (extreme, near) = unnormalizable_and_near();
+    let base = sequence_holding(&near, tuple, None);
+    assert_eq!(
+        mirror_and_report(&sequence_holding(&extreme, tuple, Some(sub())), &base),
+        [Ok(3), Ok(3)]
+    );
+    let (a, b) = lists_with_a_failing_candidate(
+        crate::value::Builder::new().object(vec![("k", base.clone()), ("n", CValue::Null)]),
+        cdict_holding(sequence_holding(&extreme, tuple, Some(sub()))),
+        cdict_holding(base),
+    );
+    let report =
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH))
+            .map(|report| report.to_json_value());
+    assert_eq!(
+        report.map(|json| json["iterable_item_removed"]
+            .as_object()
+            .map(|removed| { removed.keys().cloned().collect::<Vec<_>>() })),
+        Ok(Some(vec!["root[1]".to_string()]))
+    );
+}
+
+#[test]
+fn a_list_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    assert_sequence_of_another_class_is_a_type_change(false);
+}
+
+#[test]
+fn a_tuple_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    assert_sequence_of_another_class_is_a_type_change(true);
+}
+
+#[test]
+fn a_set_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let members = || crate::value::SetItems::new(vec![cv(&json!(1)), cv(&json!(2))]);
+    assert_eq!(
+        mirror_and_report(
+            &CValue::Set(members().with_type_name(Some(sub()))),
+            &CValue::Set(members())
+        ),
+        [Ok(1), Ok(1)]
+    );
+}
+
+#[test]
+fn a_dict_of_another_class_is_a_type_change_in_the_mirror_and_the_report() {
+    let entries = || cobj(json!({"a": 1, "b": 2}).as_object().unwrap());
+    let subclass = entries().with_dict_class(Some((sub(), std::sync::Arc::from("1"))));
+    assert_eq!(
+        mirror_and_report(&CValue::Object(subclass), &CValue::Object(entries())),
+        [Ok(3), Ok(3)]
+    );
+}
+
+fn assert_subclass_with_differing_members_is_a_type_change(base: &CValue, other: &CValue) {
+    assert_eq!(
+        mirror_and_report(&with_class(other, Some(sub())), base),
+        [Ok(3), Ok(3)]
+    );
+}
+
+#[test]
+fn a_list_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
+{
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cv(&json!([1, 2])),
+        &cv(&json!([1, 3])),
+    );
+}
+
+#[test]
+fn a_tuple_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
+{
+    assert_subclass_with_differing_members_is_a_type_change(
+        &ctup(&[json!(1), json!(2)]),
+        &ctup(&[json!(1), json!(3)]),
+    );
+}
+
+#[test]
+fn a_set_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report() {
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cset(&[json!(1), json!(2)]),
+        &cset(&[json!(1), json!(3)]),
+    );
+}
+
+#[test]
+fn a_dict_of_another_class_with_differing_members_is_one_type_change_in_the_mirror_and_the_report()
+{
+    assert_subclass_with_differing_members_is_a_type_change(
+        &cv(&json!({"a": 1, "b": 2})),
+        &cv(&json!({"a": 1, "b": 3})),
+    );
+}
+
+#[test]
+fn a_candidate_whose_trial_compares_an_unnormalizable_datetime_fails_the_diff_at_its_path() {
+    let (extreme, near) = unnormalizable_and_near();
+    let list = |items: Vec<CValue>| carr([items, vec![cv(&json!("x")), cv(&json!("y"))]].concat());
+    let (a, b) = lists_with_a_failing_candidate(
+        list(vec![near.clone(), CValue::Null]),
+        list(vec![extreme]),
+        list(vec![near]),
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &ignore_order_opts(crate::diff::DEFAULT_MAX_DEPTH)),
+        Err(crate::error::Error::DateTimeOutOfRange {
+            path: "root[1][0]".to_string()
+        })
+    );
+}
+
+#[test]
+fn a_candidate_whose_trial_meets_a_resolved_value_over_the_depth_budget_fails_the_diff() {
+    let (a, b) = lists_with_a_failing_candidate(
+        cdict_holding(cv(&json!([[2], null]))),
+        cdict_holding(copaque("1")),
+        cdict_holding(cv(&json!([[2]]))),
+    );
+    let too_deep = cv(&json!([[[[1]]]]));
+    let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&too_deep));
+    assert_eq!(
+        crate::diff::diff_with_resolver(&a, &b, &ignore_order_opts(4), &mut resolver),
+        Err(max_depth_exceeded("root[1]['k'][0]", 4))
+    );
+}
+
+#[test]
+fn a_distance_cached_at_a_shallow_occurrence_answers_a_deeper_one_whose_trial_would_fail() {
+    let (a, b) = lists_with_a_failing_candidate(
+        cdict_holding(cv(&json!([[2], null]))),
+        cdict_holding(copaque("1")),
+        cdict_holding(cv(&json!([[2]]))),
+    );
+    let too_deep = cv(&json!([[[[1]]]]));
+    let document = |list: &CValue, shallow_key: &str, deep_key: &str| {
+        let mut builder = crate::value::Builder::new();
+        let inner = builder.object(vec![("f", list.clone())]);
+        let deep = builder.object(vec![("e", inner)]);
+        builder.object(vec![(shallow_key, list.clone()), (deep_key, deep)])
+    };
+    let run = |shallow_key, deep_key| {
+        let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&too_deep));
+        crate::diff::diff_with_resolver(
+            &document(&a, shallow_key, deep_key),
+            &document(&b, shallow_key, deep_key),
+            &ignore_order_opts(7),
+            &mut resolver,
+        )
+        .map(|report| report.is_empty())
+    };
+    assert_eq!(
+        [run("a", "z"), run("z", "a")],
+        [
+            Ok(false),
+            Err(max_depth_exceeded("root['a']['e']['f'][1]['k'][0]", 7))
+        ]
+    );
+}
+
+/// Pins the datetime pair's scale: instants in seconds, as `_get_datetime_distance`
+/// reads `timestamp()`.
+#[test]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "mirrors distance_family's own allow: Python's int-to-float timestamp() \
+              conversion is likewise inexact past 2^53"
+)]
+fn rough_distance_datetime_pair_measures_seconds_not_microseconds() {
+    let a = cdt_at(2024, 1, 1, 0, 0, 0, 0, None);
+    let b = cdt_at(2024, 1, 1, 0, 0, 10, 0, None);
+    let (CValue::DateTime(a_dt), CValue::DateTime(b_dt)) = (&a, &b) else {
+        panic!("cdt_at builds a DateTime")
+    };
+    let a_seconds = a_dt.instant() as f64 / 1_000_000.0;
+    let b_seconds = b_dt.instant() as f64 / 1_000_000.0;
+    let expected = numeric_distance(a_seconds, b_seconds, CUTOFF_DISTANCE_FOR_PAIRS);
+
+    let d = super::distance::rough_distance(
+        &a,
+        &b,
+        CUTOFF_DISTANCE_FOR_PAIRS,
+        0,
+        &DiffOptions::default(),
+        &super::IgnoreOrderMemo::new(),
+    )
+    .unwrap();
+    assert!(
+        (d - expected).abs() < 1e-12,
+        "expected {expected} (seconds-scale), got {d}"
+    );
+}
+
+// --- rough_length / item_length -----------------------------------
+
+#[test]
+fn rough_length_matches_deephash_counts_for_scalars_and_containers() {
+    assert_eq!(rough_length(&json!(1)), 1);
+    assert_eq!(rough_length(&json!("x")), 1);
+    assert_eq!(rough_length(&serde_json::Value::Null), 1);
+    assert_eq!(rough_length(&json!([1, 2])), 1 + 1 + 1);
+    assert_eq!(rough_length(&json!({"a": 1})), 1 + (1 + 1));
+}
+
+#[test]
+fn item_length_of_null_is_zero() {
+    // _get_item_length(None) == 0.
+    assert_eq!(item_length(&serde_json::Value::Null), 0);
+}
+
+#[test]
+fn item_length_excludes_special_dict_keys() {
+    // _get_item_length({"old_value": 5, "x": 3}) == 1.
+    assert_eq!(item_length(&json!({"old_value": 5, "x": 3})), 1);
+}
+
+#[test]
+fn is_length_excluded_key_matches_the_literal_set() {
+    assert!(is_length_excluded_key("old_value"));
+    assert!(is_length_excluded_key("old_type"));
+    assert!(is_length_excluded_key("new_path"));
+    assert!(is_length_excluded_key("deep_distance"));
+    assert!(is_length_excluded_key("_internal"));
+    assert!(!is_length_excluded_key("new_value"));
+    assert!(!is_length_excluded_key("new_type"));
+    assert!(!is_length_excluded_key("x"));
+}
+
+#[test]
+fn item_length_of_scalars_and_containers() {
+    assert_eq!(item_length(&json!(1)), 1);
+    assert_eq!(item_length(&json!("x")), 1);
+    assert_eq!(item_length(&json!(true)), 1);
+    assert_eq!(item_length(&json!([1, 2, "x"])), 3);
+    assert_eq!(item_length(&json!({"a": 1, "b": [1, 2]})), 3);
+}
+
+#[test]
+fn item_key_ord_is_consistent_with_eq() {
+    let a = item_key(&json!(1));
+    let b = item_key(&json!(1));
+    assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+}
+
+// --- distance-memoization decision equivalence --------------------------
+
+use proptest::prelude::*;
+
+/// Generates a nested JSON value biased toward the shapes `ignore_order`
+/// pairing exercises: lists (some nested), dicts, and scalars, up to a
+/// modest depth.
+fn arb_nested() -> impl Strategy<Value = serde_json::Value> {
+    let leaf = prop_oneof![
+        Just(serde_json::Value::Null),
+        any::<bool>().prop_map(serde_json::Value::Bool),
+        any::<i32>().prop_map(|i| json!(i)),
+        "[a-z]{0,3}".prop_map(serde_json::Value::String),
+    ];
+    leaf.prop_recursive(6, 48, 4, |inner| {
+        prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+            prop::collection::hash_map("[a-c]", inner, 0..3)
+                .prop_map(|map| serde_json::Value::Object(map.into_iter().collect())),
+        ]
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(600))]
+
+    /// The distance memo must change no decision: an `ignore_order` diff run
+    /// with the memo enabled produces a byte-identical report to one run with
+    /// it disabled, over generated nested shapes.
+    #[test]
+    fn memoized_and_unmemoized_reports_are_byte_identical(
+        a in arb_nested(),
+        b in arb_nested(),
+    ) {
+        let a = crate::value::Value::from(a);
+        let b = crate::value::Value::from(b);
+        let opts = DiffOptions {
+            ignore_order: true,
+            max_depth: 1_000,
+        };
+        let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &super::IgnoreOrderMemo::new());
+        let without =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &super::IgnoreOrderMemo::disabled());
+        prop_assert_eq!(
+            with.map(|report| report.to_json_value().to_string()),
+            without.map(|report| report.to_json_value().to_string()),
+        );
+    }
+}
+
+/// A memoized deep-nested `ignore_order` diff recomputes each level's pairing
+/// distance once: a depth-`d` single-element chain records `d - 1` memo puts.
+#[test]
+fn deep_nested_ignore_order_memoizes_distance_computations_linearly() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 100_000,
+    };
+    let build = |depth: usize, leaf: i64| {
+        let mut value = json!(leaf);
+        for _ in 0..depth {
+            value = json!([value]);
+        }
+        crate::value::Value::from(value)
+    };
+
+    let recomputations_at = |depth: usize| -> usize {
+        let (a, b) = (build(depth, 1), build(depth, 2));
+        let memo = IgnoreOrderMemo::new();
+        let report = crate::diff::diff_with_options_memo(&a, &b, &opts, &memo)
+            .unwrap_or_else(|e| panic!("depth-{depth} diffs: {e}"));
+        assert!(
+            !report.is_empty(),
+            "depth-{depth} unequal input must report a change"
+        );
+        memo.put_count()
+    };
+
+    for depth in [20usize, 25] {
+        let puts = recomputations_at(depth);
+        assert_eq!(
+            puts,
+            depth - 1,
+            "depth-{depth} nested ignore_order recomputed {puts} distances, \
+             expected exactly {} (one per level) — the distance memo is not \
+             being hit",
+            depth - 1
+        );
+    }
+}
+
+// --- tuples under ignore_order -------------------------------------------
+//
+// Tuples cannot be written as JSON literals, so these build compact values
+// directly and route through one local helper.
+
+/// `ignore_order_diff` for values that are already compact (a tuple has no
+/// `serde_json` literal form).
+fn ignore_order_diff_compact(a: &CValue, b: &CValue) -> serde_json::Value {
+    crate::diff::diff_with_options(
+        a,
+        b,
+        &DiffOptions {
+            ignore_order: true,
+            ..DiffOptions::default()
+        },
+    )
+    .unwrap()
+    .to_json_value()
+}
+
+#[test]
+fn a_tuple_and_a_list_with_the_same_items_never_hash_match() {
+    // DeepHash carries the type, so `[(1, 2)]` vs `[[1, 2]]` does not match
+    // as equal: the two items pair by distance and the type change is
+    // reported.
+    assert_ne!(
+        super::hash::item_key(&ctup(&[json!(1), json!(2)]), &IgnoreOrderMemo::new()),
+        super::hash::item_key(&cv(&json!([1, 2])), &IgnoreOrderMemo::new()),
+    );
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &cv(&json!([[1, 2]])),
+        ),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "tuple", "new_type": "list",
+            "old_value": [1, 2], "new_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn a_tuple_nested_in_a_list_hashes_order_insensitively() {
+    // `DeepHash`'s `ignore_iterable_order` default applies to tuples too:
+    // `[(1, 2)]` vs `[(2, 1)]` reports nothing at all.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &carr(vec![ctup(&[json!(2), json!(1)])]),
+        ),
+        json!({})
+    );
+}
+
+#[test]
+fn a_tuple_is_itself_paired_by_hash_under_ignore_order() {
+    // The container being diffed is the tuple: `(1, 2, 3)` vs `(3, 2, 5)`
+    // pairs 1 <-> 5 across drifted indices, carrying `new_path`.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &ctup(&[json!(1), json!(2), json!(3)]),
+            &ctup(&[json!(3), json!(2), json!(5)]),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": 5, "old_value": 1, "new_path": "root[2]",
+        }}})
+    );
+}
+
+#[test]
+fn a_changed_tuple_inside_a_list_pairs_and_carries_new_path() {
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![cv(&json!("anchor")), ctup(&[json!(1), json!(2)])]),
+            &carr(vec![ctup(&[json!(1), json!(3)]), cv(&json!("anchor"))]),
+        ),
+        json!({"values_changed": {"root[1][1]": {
+            "new_value": 3, "old_value": 2, "new_path": "root[0][1]",
+        }}})
+    );
+}
+
+#[test]
+fn a_tuple_and_a_list_whose_items_differ_fall_back_to_raw_add_remove() {
+    // The pairing distance hinges on `list(t1) == t2`: with differing items
+    // the delta view keeps `new_value`, the distance crosses the cutoff, and
+    // real DeepDiff reports a whole-value change rather than a type change.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &cv(&json!([[1, 3]])),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": [1, 3], "old_value": [1, 2],
+        }}})
+    );
+}
+
+// --- DeepHash's shared cache: Python-equal hashable tuples collide ---------
+//
+// `DeepHash` keys its cache by the object itself and shares one cache across
+// both hashtables of a run, so a hashable tuple inherits the digest of an
+// earlier Python-equal one (see `docs/design/ignore-order.md`'s "Distance
+// memo" section).
+
+#[test]
+fn a_hashable_tuple_inherits_the_digest_of_an_earlier_python_equal_one() {
+    for (a, b) in [
+        (ctup(&[json!(1)]), ctup(&[json!(1.0)])),
+        (ctup(&[json!(1.0)]), ctup(&[json!(1)])),
+        (ctup(&[json!(true)]), ctup(&[json!(1)])),
+        (ctup(&[json!(0)]), ctup(&[json!(false)])),
+        (
+            ctup(&[json!("a"), json!(1)]),
+            ctup(&[json!("a"), json!(1.0)]),
+        ),
+    ] {
+        assert_eq!(
+            ignore_order_diff_compact(&carr(vec![a]), &carr(vec![b])),
+            json!({}),
+        );
+    }
+}
+
+#[test]
+fn the_digest_collision_reaches_tuples_nested_inside_other_containers() {
+    // The cache is consulted at every tuple node, so a tuple wrapped in
+    // another tuple, in a dict, or in a list collides just the same.
+    let wrapped = |item: CValue| {
+        (
+            carr(vec![ctuple(vec![item.clone()])]),
+            carr(vec![cobj_of("k", item.clone())]),
+            carr(vec![carr(vec![item])]),
+        )
+    };
+    let (a_tuple, a_dict, a_list) = wrapped(ctup(&[json!(1)]));
+    let (b_tuple, b_dict, b_list) = wrapped(ctup(&[json!(1.0)]));
+
+    assert_eq!(ignore_order_diff_compact(&a_tuple, &b_tuple), json!({}));
+    assert_eq!(ignore_order_diff_compact(&a_dict, &b_dict), json!({}));
+    assert_eq!(ignore_order_diff_compact(&a_list, &b_list), json!({}));
+}
+
+#[test]
+fn colliding_tuples_in_one_list_collapse_to_a_single_distinct_item() {
+    // `[(1,), (1.0,)]` holds two items with one digest between them, so
+    // removing the whole list reports one removal, at the first index.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1)]), ctup(&[json!(1.0)])]),
+            &carr(vec![]),
+        ),
+        json!({"iterable_item_removed": {"root[0]": [1]}})
+    );
+}
+
+#[test]
+fn a_tuple_digest_cache_hit_reads_its_own_index_not_the_first_ones() {
+    // Three hashable tuples share one run's cache: `(9,)` gets index 0
+    // (fresh), `(1,)` gets index 1 (fresh), and `(1.0,)` -- Python-equal to
+    // `(1,)` -- is a cache HIT reading `node_digests[id.index()]`, on both sides
+    // of the diff (the shared memo spans the whole run).
+    let a = carr(vec![
+        ctup(&[json!(9)]),
+        ctup(&[json!(1)]),
+        ctup(&[json!(1.0)]),
+    ]);
+    let b = carr(vec![ctup(&[json!(9)]), ctup(&[json!(1)])]);
+    assert_eq!(ignore_order_diff_compact(&a, &b), json!({}));
+}
+
+#[test]
+fn an_unhashable_tuple_never_collides() {
+    // A tuple holding a list or a dict cannot be a Python dict key, so it
+    // misses the cache entirely and keeps its own type-strict digest.
+    let list_inside =
+        |first: serde_json::Value| carr(vec![ctuple(vec![cv(&first), cv(&json!([1]))])]);
+    assert_eq!(
+        ignore_order_diff_compact(&list_inside(json!(1)), &list_inside(json!(1.0))),
+        json!({"type_changes": {"root[0][0]": {
+            "old_type": "int", "new_type": "float",
+            "old_value": 1, "new_value": 1.0,
+        }}})
+    );
+
+    let dict_inside = |first: serde_json::Value| carr(vec![ctup(&[first, json!({"k": 1})])]);
+    assert_eq!(
+        ignore_order_diff_compact(&dict_inside(json!(1)), &dict_inside(json!(1.0))),
+        json!({"type_changes": {"root[0][0]": {
+            "old_type": "int", "new_type": "float",
+            "old_value": 1, "new_value": 1.0,
+        }}})
+    );
+}
+
+#[test]
+fn the_collision_is_positional_not_the_order_insensitive_content_digest() {
+    // Python tuple equality is positional, so a reordered pair of the other
+    // numeric type does NOT inherit: `(1, 2)` and `(2.0, 1.0)` are neither
+    // Python-equal nor equal in content digest (int keys vs float keys).
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1), json!(2)])]),
+            &carr(vec![ctup(&[json!(2.0), json!(1.0)])]),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": [2.0, 1.0], "old_value": [1, 2],
+        }}})
+    );
+}
+
+#[test]
+fn which_member_of_an_equality_class_is_hashed_first_is_observable() {
+    // The content digest deduplicates, so `(1, 1)` and `(1,)` share one. The
+    // float tuple is not Python-equal to `(1, 1)`, so when it is hashed first
+    // it fixes the class digest as the float one and the two no longer match.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1)])]),
+            &carr(vec![ctup(&[json!(1), json!(1)])]),
+        ),
+        json!({})
+    );
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctup(&[json!(1.0)])]),
+            &carr(vec![ctup(&[json!(1), json!(1)])]),
+        ),
+        json!({"type_changes": {"root[0][0]": {
+            "old_type": "float", "new_type": "int",
+            "old_value": 1.0, "new_value": 1,
+        }}})
+    );
+}
+
+#[test]
+fn a_collided_element_drops_out_of_its_parents_own_comparison() {
+    // The tuples at index 0 of each paired item match on their inherited
+    // digest, so only the sibling difference is reported.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctuple(vec![ctup(&[json!(1)]), cv(&json!("a"))])]),
+            &carr(vec![ctuple(vec![ctup(&[json!(1.0)]), cv(&json!("b"))])]),
+        ),
+        json!({"values_changed": {"root[0][1]": {
+            "new_value": "b", "old_value": "a",
+        }}})
+    );
+}
+
+// --- the list(t1) == t2 coercion test uses Python equality ----------------
+
+#[test]
+fn a_tuple_and_a_list_whose_items_are_python_equal_still_pair() {
+    // `list((1,)) == [1.0]` in Python, so DeepDiff's delta view omits
+    // new_value and the pair stays inside the pairing cutoff.
+    for (a, b) in [
+        (ctup(&[json!(1)]), cv(&json!([1.0]))),
+        (ctup(&[json!(1), json!(2)]), cv(&json!([1.0, 2.0]))),
+        (ctup(&[json!(1)]), cv(&json!([true]))),
+        (ctup(&[json!(0)]), cv(&json!([false]))),
+    ] {
+        let expected_old = a.to_serde_json();
+        let expected_new = b.to_serde_json();
+        assert_eq!(
+            ignore_order_diff_compact(&carr(vec![a]), &carr(vec![b])),
+            json!({"type_changes": {"root[0]": {
+                "old_type": "tuple", "new_type": "list",
+                "old_value": expected_old, "new_value": expected_new,
+            }}})
+        );
+    }
+}
+
+#[test]
+fn python_equality_keeps_container_kinds_distinct_inside_the_coercion_test() {
+    // `list((1, (2,))) == [1, [2]]` is False in Python — a tuple never
+    // equals a list, at any depth — so this pair keeps new_value, misses the
+    // cutoff, and reports as a whole-value change instead of a type change.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctuple(vec![cv(&json!(1)), ctup(&[json!(2)])])]),
+            &cv(&json!([[1, [2]]])),
+        ),
+        json!({"values_changed": {"root[0]": {
+            "new_value": [1, [2]], "old_value": [1, [2]],
+        }}})
+    );
+
+    // With a real list in the same position it does equal, and pairs.
+    assert_eq!(
+        ignore_order_diff_compact(
+            &carr(vec![ctuple(vec![cv(&json!(1)), cv(&json!([2]))])]),
+            &cv(&json!([[1, [2]]])),
+        ),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "tuple", "new_type": "list",
+            "old_value": [1, [2]], "new_value": [1, [2]],
+        }}})
+    );
+}
+
+#[test]
+fn tuple_and_list_leaf_lengths_follow_python_equality() {
+    // The rule directly, at its boundary: Python-equal items omit new_value
+    // (leaf length 1) in either direction; a differing item keeps it.
+    assert_eq!(
+        super::distance::type_change_leaf_length(&ctup(&[json!(1)]), &cv(&json!([1.0]))),
+        1
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(&cv(&json!([1.0])), &ctup(&[json!(1)])),
+        1
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(&ctup(&[json!(1)]), &cv(&json!([2]))),
+        2
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(&ctup(&[json!(1), json!(2)]), &cv(&json!([1, 3]))),
+        3
+    );
+
+    // A dict element compares by keys and by Python-equal values, so an equal
+    // dict omits new_value while a changed value or a changed key keeps it.
+    assert_eq!(
+        super::distance::type_change_leaf_length(
+            &ctup(&[json!({"k": 1})]),
+            &cv(&json!([{"k": 1.0}]))
+        ),
+        1
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(
+            &ctup(&[json!({"k": 1})]),
+            &cv(&json!([{"k": 2}]))
+        ),
+        2
+    );
+    assert_eq!(
+        super::distance::type_change_leaf_length(
+            &ctup(&[json!({"k": 1})]),
+            &cv(&json!([{"j": 1}]))
+        ),
+        2
+    );
+}
+
+/// A compact one-key object, for a test that needs a dict around a value a
+/// `serde_json` literal cannot express.
+fn cobj_of(key: &str, value: CValue) -> CValue {
+    CValue::Object(crate::value::Object::from_pairs(vec![(
+        ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from(key))),
+        value,
+    )]))
+}
+
+// --- datetimes and dates -------------------------------------------------
+
+#[test]
+fn a_naive_and_an_aware_datetime_at_one_instant_hash_match() {
+    // `DeepHash._prep_datetime` normalizes to UTC before formatting its
+    // digest, so these pair with no finding at all.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = carr(vec![cdt_at(2024, 1, 1, 10, 0, 0, 0, None)]);
+    let b = carr(vec![cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600))]);
+
+    assert!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_date_and_a_datetime_at_one_midnight_never_hash_match() {
+    // `_prep_date` skips normalization and formats a bare `YYYY-MM-DD`,
+    // which can never collide with `_prep_datetime`'s
+    // `YYYY-MM-DD HH:MM:SS+00:00` — the two are paired by distance instead,
+    // which surfaces as a type change rather than as nothing.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = carr(vec![cdate(2024, 1, 1)]);
+    let b = carr(vec![cdt(2024, 1, 1, None)]);
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "date",
+            "new_type": "datetime",
+            "old_value": "2024-01-01",
+            "new_value": "2024-01-01T00:00:00",
+        }}})
+    );
+}
+
+#[test]
+fn a_paired_datetime_is_reported_normalized_while_an_unpaired_one_stays_raw() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = carr(vec![
+        cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(-5 * 3600)),
+        cv(&json!("anchor")),
+    ]);
+    let b = carr(vec![
+        cv(&json!("anchor")),
+        cdt_at(2024, 1, 2, 10, 0, 0, 0, Some(-5 * 3600)),
+        cv(&json!("extra")),
+    ]);
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({
+            "values_changed": {"root[0]": {
+                "new_path": "root[1]",
+                "new_value": "2024-01-02T15:00:00+00:00",
+                "old_value": "2024-01-01T15:00:00+00:00",
+            }},
+            "iterable_item_added": {"root[2]": "extra"},
+        })
+    );
+}
+
+#[test]
+fn calendar_values_count_as_one_structural_node() {
+    // Both `_get_item_length` and `DeepHash`'s own node count treat a
+    // datetime and a date as a single leaf, like any other scalar.
+    assert_eq!(super::distance::item_length(&cdt(2024, 1, 1, None)), 1);
+    assert_eq!(super::distance::item_length(&cdate(2024, 1, 1)), 1);
+    assert_eq!(super::distance::rough_length(&cdt(2024, 1, 1, None)), 1);
+    assert_eq!(super::distance::rough_length(&cdate(2024, 1, 1)), 1);
+}
+
+#[test]
+fn a_datetime_leaf_counts_as_changed_only_when_the_instants_differ() {
+    let opts = DiffOptions::default();
+    let memo = IgnoreOrderMemo::new();
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
+
+    assert_eq!(
+        count(
+            &cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
+            &cdt_at(2024, 1, 1, 12, 0, 0, 0, Some(2 * 3600))
+        ),
+        0
+    );
+    assert_eq!(count(&cdt(2024, 1, 1, None), &cdt(2024, 1, 2, None)), 1);
+    assert_eq!(count(&cdate(2024, 1, 1), &cdate(2024, 1, 1)), 0);
+    assert_eq!(count(&cdate(2024, 1, 1), &cdate(2024, 1, 2)), 1);
+}
+
+#[test]
+fn a_time_leaf_counts_as_changed_only_by_plain_time_equality() {
+    let opts = DiffOptions::default();
+    let memo = IgnoreOrderMemo::new();
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
+
+    // Two aware values at the same offset-adjusted instant: equal.
+    assert_eq!(
+        count(
+            &ctime(10, 0, 0, 0, Some(0)),
+            &ctime(12, 0, 0, 0, Some(2 * 3600))
+        ),
+        0
+    );
+    // A naive value is never equal to an aware one, unlike a datetime.
+    assert_eq!(
+        count(&ctime(10, 0, 0, 0, None), &ctime(10, 0, 0, 0, Some(0))),
+        1
+    );
+    assert_eq!(
+        count(&ctime(10, 0, 0, 0, None), &ctime(10, 0, 0, 0, None)),
+        0
+    );
+    assert_eq!(
+        count(&ctime(10, 0, 0, 0, None), &ctime(11, 0, 0, 0, None)),
+        1
+    );
+}
+
+#[test]
+fn dist_key_hashes_time_and_timedelta_leaves_consistently_with_equality() {
+    // `DistKey`'s `Hash` (backing the ignore_order distance memo) must run
+    // its `Value::Time`/`Value::TimeDelta` arms and agree with `Eq` --
+    // guards `hash_value`'s own match arms for both.
+    assert_eq!(
+        dist_hash(&ctime(10, 0, 0, 0, Some(0))),
+        dist_hash(&ctime(12, 0, 0, 0, Some(2 * 3600)))
+    );
+    assert_ne!(
+        dist_hash(&ctime(10, 0, 0, 0, None)),
+        dist_hash(&ctime(10, 0, 0, 0, Some(0)))
+    );
+    assert_eq!(
+        dist_hash(&ctimedelta(0, 1, 0)),
+        dist_hash(&ctimedelta(0, 1, 0))
+    );
+    assert_ne!(
+        dist_hash(&ctimedelta(0, 1, 0)),
+        dist_hash(&ctimedelta(0, 2, 0))
+    );
+}
+
+#[test]
+fn a_timedelta_leaf_counts_as_changed_only_when_the_exact_value_differs() {
+    let opts = DiffOptions::default();
+    let memo = IgnoreOrderMemo::new();
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
+
+    assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 1, 0)), 0);
+    assert_eq!(count(&ctimedelta(0, 1, 0), &ctimedelta(0, 2, 0)), 1);
+}
+
+#[test]
+fn a_date_and_a_datetime_pair_by_ordinal_distance_in_either_direction() {
+    // `get_numeric_types_distance` walks `TYPES_TO_DIST_FUNC` in order and
+    // matches the mixed pair on its `datetime.date` entry, because `datetime`
+    // is a `date` subclass — so the pair is measured in ordinals and lands
+    // well inside the pairing cutoff whichever side each type is on.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let date_side = carr(vec![cdate(2024, 1, 1)]);
+    let datetime_side = carr(vec![cdt(2024, 3, 5, None)]);
+
+    let forward = crate::diff::diff_with_options(&date_side, &datetime_side, &opts).unwrap();
+    let backward = crate::diff::diff_with_options(&datetime_side, &date_side, &opts).unwrap();
+
+    assert_eq!(
+        forward.to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "date",
+            "new_type": "datetime",
+            "old_value": "2024-01-01",
+            "new_value": "2024-03-05T00:00:00",
+        }}})
+    );
+    assert_eq!(
+        backward.to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "datetime",
+            "new_type": "date",
+            "old_value": "2024-03-05T00:00:00",
+            "new_value": "2024-01-01",
+        }}})
+    );
+}
+
+#[test]
+fn a_calendar_value_is_truthy_when_a_type_change_coerces_it_to_bool() {
+    // `_from_tree_type_changes` omits `new_value` when `new_type(old_value)`
+    // reproduces it, and `bool(datetime(...))`/`bool(date(...))` is always
+    // True: the pair against `True` has leaf length 1, against `False` length 2.
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+
+    assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&cdate(2024, 1, 1), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!(false))), 2);
+    assert_eq!(leaf(&cdt(2024, 1, 1, None), &cv(&json!("x"))), 2);
+}
+
+#[test]
+fn a_time_is_truthy_and_a_timedelta_is_truthy_only_when_non_zero() {
+    // `bool(time(...))` is always True. `bool(timedelta(...))` is False only for
+    // the zero duration.
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+
+    assert_eq!(leaf(&ctime(0, 0, 0, 0, None), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&ctime(0, 0, 0, 0, None), &cv(&json!(false))), 2);
+    assert_eq!(leaf(&ctimedelta(0, 0, 0), &cv(&json!(false))), 1);
+    assert_eq!(leaf(&ctimedelta(0, 0, 0), &cv(&json!(true))), 2);
+    assert_eq!(leaf(&ctimedelta(0, 1, 0), &cv(&json!(true))), 1);
+    assert_eq!(leaf(&ctimedelta(0, 1, 0), &cv(&json!(false))), 2);
+}
+
+#[test]
+fn a_time_or_timedelta_pairs_with_its_own_str_via_type_change_coercion() {
+    // `str(time)`/`str(timedelta)` are ordinary strings Python produces
+    // happily, so `new_type(old_value)` reproduces the new value and the
+    // delta omits it — see `coerce_to_python_str`'s calendar arms.
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+    let t = ctime(10, 30, 0, 0, None);
+    let d = ctimedelta(0, 1, 0);
+
+    assert_eq!(leaf(&t, &cv(&json!("10:30:00"))), 1);
+    assert_eq!(leaf(&t, &cv(&json!("not it"))), 2);
+    assert_eq!(leaf(&d, &cv(&json!("0:00:01"))), 1);
+    assert_eq!(leaf(&d, &cv(&json!("not it"))), 2);
+}
+
+#[test]
+fn a_calendar_value_and_a_number_share_no_distance_family_and_never_pair() {
+    // `get_numeric_types_distance` returns `not_found` unless both values are
+    // an `isinstance` of the *same* entry, so this pair takes the structural
+    // fallback, measures as maximally far, and is reported as an add plus a
+    // remove rather than a type change.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = carr(vec![
+        cdt_at(2024, 1, 1, 10, 0, 0, 0, None),
+        cv(&json!("anchor")),
+    ]);
+    let b = carr(vec![cv(&json!("anchor")), cv(&json!(5))]);
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({
+            "iterable_item_added": {"root[1]": 5},
+            "iterable_item_removed": {"root[0]": "2024-01-01T10:00:00"},
+        })
+    );
+}
+
+#[test]
+fn a_calendar_value_against_its_own_python_str_is_reproduced_by_coercion() {
+    // `str(datetime)` uses a space separator, not a `T`, so only the
+    // space-separated string is reproducible: `_get_item_length` is `1` for the
+    // first two pairs (no `new_value` key) and `2` for the third.
+    let leaf = |a: &CValue, b: &CValue| super::distance::type_change_leaf_length(a, b);
+
+    assert_eq!(
+        leaf(&cdt(2024, 1, 1, None), &cv(&json!("2024-01-01 00:00:00"))),
+        1
+    );
+    assert_eq!(leaf(&cdate(2024, 1, 1), &cv(&json!("2024-01-01"))), 1);
+    assert_eq!(
+        leaf(&cdt(2024, 1, 1, None), &cv(&json!("2024-01-01T00:00:00"))),
+        2
+    );
+    assert_eq!(
+        leaf(
+            &cdt_at(2024, 1, 1, 10, 0, 0, 0, Some(1830)),
+            &cv(&json!("2024-01-01 10:00:00+00:30:30"))
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_calendar_value_pairs_with_its_own_python_str_under_ignore_order() {
+    // The end-to-end consequence of the coercion above: because `str()`
+    // reproduces the new value, the delta omits it, the pair stays inside
+    // the pairing cutoff, and the result is a `type_changes` rather than an
+    // add plus a remove merged into an unrelated `values_changed`. The
+    // values sit inside a dict because that is what makes the distance small
+    // enough to pair: two bare scalars have a rough length of 2 between
+    // them, so even a `diff_length` of 1 lands on 0.5, over the 0.3 cutoff —
+    // real `DeepDiff` reports a plain `values_changed` for the bare pair
+    // too, which the sibling case below pins.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let wrapped = |value: CValue| {
+        let mut builder = crate::value::Builder::new();
+        carr(vec![builder.object(vec![("a".to_string(), value)])])
+    };
+
+    assert_eq!(
+        crate::diff::diff_with_options(
+            &wrapped(cdt(2024, 1, 1, None)),
+            &wrapped(cv(&json!("2024-01-01 00:00:00"))),
+            &opts,
+        )
+        .unwrap()
+        .to_json_value(),
+        json!({"type_changes": {"root[0]['a']": {
+            "old_type": "datetime",
+            "new_type": "str",
+            "old_value": "2024-01-01T00:00:00",
+            "new_value": "2024-01-01 00:00:00",
+        }}})
+    );
+    assert_eq!(
+        crate::diff::diff_with_options(
+            &wrapped(cdate(2024, 1, 1)),
+            &wrapped(cv(&json!("2024-01-01"))),
+            &opts,
+        )
+        .unwrap()
+        .to_json_value(),
+        json!({"type_changes": {"root[0]['a']": {
+            "old_type": "date",
+            "new_type": "str",
+            "old_value": "2024-01-01",
+            "new_value": "2024-01-01",
+        }}})
+    );
+}
+
+#[test]
+fn two_bare_scalars_are_too_far_apart_to_pair_even_when_str_reproduces_one() {
+    // The control for the case above: same values, no surrounding dict, so
+    // the rough length is 2 and a `diff_length` of 1 gives 0.5 — over the
+    // cutoff. Real `DeepDiff` likewise reports a `values_changed` here (an
+    // add and a remove at one path, merged by
+    // `mutual_add_removes_to_become_value_changes`), not a `type_changes`.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = carr(vec![cdt(2024, 1, 1, None)]);
+    let b = carr(vec![cv(&json!("2024-01-01 00:00:00"))]);
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({"values_changed": {"root[0]": {
+            "old_value": "2024-01-01T00:00:00",
+            "new_value": "2024-01-01 00:00:00",
+        }}})
+    );
+}
+
+#[test]
+fn a_pre_epoch_datetime_pairs_with_a_date_by_ordinal_not_by_timestamp() {
+    // The two measures disagree here, which is what makes this case able to
+    // notice a swap: the ordinal distance is ~0.003 (well inside the 0.3
+    // cutoff, so the pair forms), while the timestamp distance is exactly
+    // the cutoff — `_get_numbers_distance`'s divisor is `(n1 + n2) / max_`,
+    // and a negative timestamp against a positive one nearly cancels it, so
+    // the self-cancellation quirk that keeps same-sign numbers close does
+    // not apply. Measuring this pair by timestamp would reject it.
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let a = carr(vec![cdt(1950, 1, 1, None), cv(&json!("anchor"))]);
+    let b = carr(vec![cv(&json!("anchor")), cdate(1990, 1, 1)]);
+
+    assert_eq!(
+        crate::diff::diff_with_options(&a, &b, &opts)
+            .unwrap()
+            .to_json_value(),
+        json!({"type_changes": {"root[0]": {
+            "old_type": "datetime",
+            "new_type": "date",
+            "new_path": "root[1]",
+            "old_value": "1950-01-01T00:00:00",
+            "new_value": "1990-01-01",
+        }}})
+    );
+}
+
+// --- sets ----------------------------------------------------------------
+
+/// An `ignore_order` diff of two already-compact values, for the set cases
+/// whose inputs no JSON literal can express.
+fn compact_ignore_order_diff(
+    a: &CValue,
+    b: &CValue,
+) -> Result<crate::report::Report, crate::error::Error> {
+    crate::diff::diff_with_options(
+        a,
+        b,
+        &DiffOptions {
+            ignore_order: true,
+            ..DiffOptions::default()
+        },
+    )
+}
+
+/// A one-item list holding `value`, the shape that puts a set through the
+/// `ignore_order` hashing path rather than through a direct set diff.
+fn listed(value: CValue) -> CValue {
+    CValue::Array(Box::new([value]).into())
+}
+
+/// Each container kind hashes into its own bucket, so two of them holding
+/// the same items never hash-match — the pairing recurses instead and finds
+/// a type change (golden: `ignore_order_set_vs_list_never_hash_match`).
+#[test]
+fn a_set_never_hash_matches_another_container_kind() {
+    let items = [json!(1), json!(2)];
+    for (other, new_type) in [
+        (cv(&json!([1, 2])), "list"),
+        (ctup(&items), "tuple"),
+        (cfrozen(&items), "frozenset"),
+    ] {
+        let report = compact_ignore_order_diff(&listed(cset(&items)), &listed(other))
+            .expect("shallow values diff cleanly");
+        assert_eq!(
+            report.to_json_value()["type_changes"]["root[0]"]["new_type"],
+            json!(new_type),
+        );
+    }
+}
+
+/// A set's own items hash order-insensitively, so a reordered set pairs as
+/// equal (golden: `ignore_order_list_of_sets_pairs`).
+#[test]
+fn sets_holding_the_same_items_hash_match() {
+    let report = compact_ignore_order_diff(
+        &listed(cset(&[json!(1), json!(2)])),
+        &listed(cset(&[json!(2), json!(1)])),
+    )
+    .expect("shallow values diff cleanly");
+
+    assert!(report.is_empty());
+}
+
+/// Neither set kind consults the run's digest cache: a `set` is unhashable
+/// in Python, and a `frozenset` is kept out of it, so both keep their own
+/// content key.
+#[test]
+fn neither_set_kind_inherits_another_items_digest() {
+    let frozen = compact_ignore_order_diff(
+        &listed(cfrozen(&[json!(1)])),
+        &listed(cfrozen(&[json!(1.0)])),
+    )
+    .expect("shallow values diff cleanly");
+    assert_eq!(
+        frozen.to_json_value(),
+        json!({"values_changed": {"root[0]": {"old_value": [1], "new_value": [1.0]}}}),
+        "the two frozensets are distinct items, and too far apart to pair"
+    );
+
+    let plain = compact_ignore_order_diff(
+        &CValue::Array(Box::new([cset(&[json!(1)]), cset(&[json!(1.0)])]).into()),
+        &CValue::Array(Box::new([]).into()),
+    )
+    .expect("shallow values diff cleanly");
+    assert_eq!(
+        plain.to_json_value(),
+        json!({"iterable_item_removed": {"root[0]": [1], "root[1]": [1.0]}})
+    );
+}
+
+/// A frozenset hashes by membership, so a reordered one is the same item —
+/// and a tuple holding the same members is not, since the two are not
+/// Python-equal (golden:
+/// `set_tuple_and_frozenset_items_never_share_a_digest`).
+#[test]
+fn a_frozenset_hashes_by_membership_and_apart_from_a_tuple() {
+    let report = compact_ignore_order_diff(
+        &listed(cfrozen(&[json!(1), json!(2)])),
+        &listed(cfrozen(&[json!(2), json!(1)])),
+    )
+    .expect("shallow values diff cleanly");
+    assert!(report.is_empty());
+
+    let memo = IgnoreOrderMemo::new();
+    assert_ne!(
+        super::hash::item_key(&ctup(&[json!(1)]), &memo),
+        super::hash::item_key(&cfrozen(&[json!(1)]), &memo),
+        "a tuple and a frozenset holding the same members are not one item"
+    );
+}
+
+/// `_get_item_length` of a set diff's delta view is the number of added
+/// plus removed *items*, each measured by `item_length` (`{1, 2}` vs
+/// `{1, 2, 3, 4, 5}` measures 3).
+#[test]
+fn count_diff_leaves_of_two_sets_counts_added_and_removed_items() {
+    let memo = IgnoreOrderMemo::new();
+    let opts = DiffOptions::default();
+    let count =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
+
+    assert_eq!(
+        count(
+            &cset(&[json!(1), json!(2)]),
+            &cset(&[json!(1), json!(2), json!(3), json!(4), json!(5)]),
+        ),
+        3
+    );
+    assert_eq!(count(&cset(&[json!(1)]), &cset(&[json!(1.0)])), 2);
+    assert_eq!(count(&cset(&[json!(1)]), &cset(&[json!(1)])), 0);
+}
+
+/// `_prep_iterable` counts a set like a list (`{1, 2}` and `[1, 2]` both count 3).
+#[test]
+fn rough_length_of_a_set_matches_a_list_of_the_same_items() {
+    assert_eq!(
+        super::distance::rough_length(&cset(&[json!(1), json!(2)])),
+        3
+    );
+    assert_eq!(super::distance::rough_length(&cfrozen(&[])), 1);
+    assert_eq!(
+        super::distance::item_length(&cset(&[json!(1), json!(2)])),
+        2
+    );
+}
+
+/// `DeepDiff`'s delta view omits a `type_changes` entry's `new_value`
+/// whenever applying the new side's own type to the old value reproduces it
+/// — for the set kinds, `set(x)`/`frozenset(x)` keeps only distinct members,
+/// so the answer never depends on order.
+#[test]
+fn a_set_type_change_omits_its_new_value_when_the_constructor_reproduces_it() {
+    let leaves = super::distance::type_change_leaf_length;
+    let items = [json!(1), json!(2)];
+
+    // Reproduced: the entry costs the single `new_type` leaf.
+    assert_eq!(leaves(&cv(&json!([1, 2])), &cset(&items)), 1);
+    assert_eq!(leaves(&ctup(&items), &cfrozen(&items)), 1);
+    assert_eq!(leaves(&cset(&items), &cfrozen(&items)), 1);
+    assert_eq!(leaves(&cset(&items), &cv(&json!([1, 2]))), 1);
+    assert_eq!(leaves(&cfrozen(&items), &ctup(&items)), 1);
+    // Python-equal members, not identical ones: `set([1, 1.0])` is `{1}`.
+    assert_eq!(leaves(&cv(&json!([1, 1.0])), &cset(&[json!(1)])), 1);
+    // A nested set member compares by membership too, one level down, for
+    // either set kind.
+    for nested in [cfrozen(&items), cset(&items)] {
+        assert_eq!(
+            leaves(
+                &CValue::Set(SetItems::new(vec![nested.clone()])),
+                &CValue::Set(SetItems::new(vec![nested])),
+            ),
+            1
+        );
+    }
+
+    // Reproduced whichever order the sequence is in: `onix` answers this by
+    // membership, where Python answers it by the set's iteration order.
+    assert_eq!(leaves(&cset(&items), &cv(&json!([2, 1]))), 1);
+
+    // Not reproduced: the entry additionally costs `new_value`'s own length.
+    assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1), json!(3)])), 3);
+
+    // A proper subset must not be "reproduced" either: `unordered_python_eq`
+    // requires membership BOTH ways. `{1}` (new) has every member in `{1, 2}`
+    // (old), but not the reverse, so the constructor does not reproduce `old`
+    // as `new`.
+    assert_eq!(leaves(&cset(&items), &cfrozen(&[json!(1)])), 2);
+}
+
+/// Python's `bool(a_set)` is emptiness, so a `type_changes` from a
+/// non-empty set to `true` is reproduced by coercion.
+#[test]
+fn a_set_coerces_to_its_own_truthiness() {
+    let leaves = super::distance::type_change_leaf_length;
+
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(true))), 1);
+    assert_eq!(leaves(&cfrozen(&[]), &cv(&json!(false))), 1);
+    // Every non-`bool` target refuses a set outright, as it does a list.
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2))), 2);
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!(2.5))), 2);
+    assert_eq!(leaves(&cset(&[json!(1)]), &cv(&json!("x"))), 2);
+}
+
+/// A nested-sequence element's `python_eq` must reject a length mismatch
+/// outright, not answer from however many elements the shorter side has.
+///
+/// `((1, 2, 3),)` vs `[[1, 2]]`: the outer tuple-vs-list pair is length-1 on
+/// both sides, so `sequences_python_eq`'s own top-level length check passes
+/// through to a per-element `python_eq` -- which is where the mismatched
+/// INNER lengths (3 vs 2) must be caught.
+#[test]
+fn python_eq_rejects_mismatched_nested_sequence_lengths() {
+    let leaves = super::distance::type_change_leaf_length;
+
+    assert_eq!(
+        leaves(&ctup(&[json!([1, 2, 3])]), &cv(&json!([[1, 2]]))),
+        1 + 2,
+        "not reproduced: the mismatched inner lengths must cost new_value's own length"
+    );
+    // The control: equal-length, equal-content inner sequences are reproduced.
+    assert_eq!(
+        leaves(&ctup(&[json!([1, 2, 3])]), &cv(&json!([[1, 2, 3]]))),
+        1
+    );
+}
+
+/// A frozenset holding an unhashable value cannot exist in Python, but the
+/// value model can express one; it still keys by its own content.
+#[test]
+fn a_frozenset_holding_an_unhashable_value_keeps_its_own_digest() {
+    let memo = IgnoreOrderMemo::new();
+    let with_list = CValue::FrozenSet(SetItems::new(vec![cv(&json!([1]))]));
+    let with_other_list = CValue::FrozenSet(SetItems::new(vec![cv(&json!([1.0]))]));
+
+    assert_ne!(
+        super::hash::item_key(&with_list, &memo),
+        super::hash::item_key(&with_other_list, &memo),
+        "an unhashable frozenset never inherits a Python-equal one's digest"
+    );
+}
+
+/// A member Python cannot hash — a list, a set or a dict — has no Python
+/// identity to compare by, so it keys structurally; only a directly-built
+/// value can carry one.
+#[test]
+fn an_unhashable_set_member_keys_structurally() {
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
+    let mut builder = crate::value::Builder::new();
+    let object = builder.object(vec![("a".to_string(), cv(&json!(1)))]);
+    let other_object = builder.object(vec![("a".to_string(), cv(&json!(2)))]);
+
+    assert_ne!(key(&cv(&json!([1]))), key(&cv(&json!([2]))));
+    assert_eq!(key(&cv(&json!([1]))), key(&cv(&json!([1]))));
+    assert_ne!(key(&cset(&[json!(1)])), key(&cset(&[json!(2)])));
+    assert_ne!(key(&object), key(&other_object));
+    assert_ne!(key(&cv(&json!([1]))), key(&ctup(&[json!(1)])));
+
+    // A nested unhashable value still keys the container it sits in.
+    assert_ne!(
+        key(&ctup(&[json!([1])])),
+        key(&ctup(&[json!([2])])),
+        "an unhashable element still distinguishes its tuple"
+    );
+
+    // A number too large for an `i64` keys apart from every other integer.
+    assert_ne!(
+        key(&CValue::Number(crate::value::Number::from_u64(u64::MAX))),
+        key(&cv(&json!(1)))
+    );
+}
+
+/// Two unhashable containers of different kinds are different members: a
+/// `list` and a `set` holding the same values are not Python-equal, so they
+/// must not share one identity even though neither can be hashed.
+#[test]
+fn unhashable_set_members_of_different_kinds_stay_distinct() {
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::set_member_digest(value, &memo);
+    let listed = |value: CValue| ctuple(vec![value]);
+
+    assert_ne!(
+        key(&listed(cv(&json!([1])))),
+        key(&listed(cset(&[json!(1)]))),
+        "a list and a set holding the same members are not one identity"
+    );
+    assert_ne!(
+        key(&listed(cv(&json!([1])))),
+        key(&listed(cfrozen(&[json!(1)])))
+    );
+
+    // End to end: a list and a set holding the same values stay distinct.
+    let with_set = CValue::Set(SetItems::new(vec![listed(cset(&[json!(1)]))]));
+    let with_list = CValue::Set(SetItems::new(vec![listed(cv(&json!([1])))]));
+    assert_eq!(
+        crate::diff::diff(&with_set, &with_list)
+            .expect("shallow sets diff cleanly")
+            .to_json_value(),
+        json!({
+            "set_item_added": ["root[([1],)]"],
+            "set_item_removed": ["root[({1},)]"],
+        })
+    );
+}
+
+/// The per-node cache decision holds whether a naive/aware (or int/float)
+/// difference sits at the member's own root or nested below it: a member's
+/// digest is built through the shared cache at every node.
+#[test]
+fn a_set_member_collapses_a_calendar_difference_at_the_root_and_below_it() {
+    let n = || cdt(2024, 1, 1, None);
+    let a = || cdt(2024, 1, 1, Some(0));
+    let i = |x: i64| cv(&json!(x));
+    let f = |x: f64| cv(&json!(x));
+    let tup = |items: Vec<CValue>| ctuple(items);
+    let fz = |items: Vec<CValue>| CValue::FrozenSet(SetItems::new(items));
+    let set = |items: Vec<CValue>| CValue::Set(SetItems::new(items));
+    let empty = |x: CValue, y: CValue| {
+        crate::diff::diff(&x, &y)
+            .expect("shallow sets diff cleanly")
+            .is_empty()
+    };
+
+    // Root level: the difference is a direct element of the member.
+    assert!(empty(
+        set(vec![tup(vec![n(), tup(vec![i(1)])])]),
+        set(vec![tup(vec![a(), tup(vec![f(1.0)])])]),
+    ));
+    assert!(
+        !empty(
+            set(vec![tup(vec![n(), i(1)])]),
+            set(vec![tup(vec![a(), f(1.0)])]),
+        ),
+        "a bare-number sibling is type-distinct with no shared cache entry"
+    );
+
+    // Below the root: `((N,),)` vs `((A,),)`, one level deeper than the rows above.
+    assert!(empty(
+        set(vec![tup(vec![tup(vec![n()])])]),
+        set(vec![tup(vec![tup(vec![a()])])]),
+    ));
+    // Deeper still: `(((N,),),)` vs `(((A,),),)`.
+    assert!(empty(
+        set(vec![tup(vec![tup(vec![tup(vec![n()])])])]),
+        set(vec![tup(vec![tup(vec![tup(vec![a()])])])]),
+    ));
+    // Through a frozenset: `fs({(N,)})` vs `fs({(A,)})`.
+    assert!(empty(
+        set(vec![fz(vec![tup(vec![n()])])]),
+        set(vec![fz(vec![tup(vec![a()])])]),
+    ));
+    // A twin naive/aware, one at the root and one below it, both collapsing.
+    assert!(empty(
+        set(vec![tup(vec![n(), tup(vec![n(), i(1)])])]),
+        set(vec![tup(vec![a(), tup(vec![a(), i(1)])])]),
+    ));
+}
+
+/// A set member's digest walk is iterative and its result compares in `O(1)`
+/// (a `RepId`), so a deeply nested member neither overflows the native stack
+/// while it is hashed nor while two members are compared — a naive structural
+/// digest with a derived comparison would overflow this small stack. The two
+/// members share one deep chain and differ only naive/aware at the outer tuple,
+/// so they match: the walk runs and the comparison fires (the two
+/// sets are unequal as wholes, so no fast path short-circuits).
+#[test]
+fn a_deeply_nested_set_member_hashes_and_compares_without_native_recursion() {
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let chain = |leaf: CValue| {
+                let mut value = leaf;
+                for _ in 0..DEPTH {
+                    value = CValue::FrozenSet(SetItems::new(vec![value]));
+                }
+                value
+            };
+            let member = |dt: CValue| {
+                CValue::Set(SetItems::new(vec![ctuple(vec![dt, chain(cv(&json!(0)))])]))
+            };
+            let a = member(cdt(2024, 1, 1, None));
+            let b = member(cdt(2024, 1, 1, Some(0)));
+            assert!(
+                crate::diff::diff(&a, &b)
+                    .expect("deep set members diff cleanly")
+                    .is_empty()
+            );
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("set-member hashing and comparison complete on a small stack");
+}
+
+/// Interning `K` set/list members must never collapse onto one hash bucket.
+///
+/// Integral and half-integer floats land in pairwise-distinct low-32-bit
+/// buckets that grow linearly with `K`: [`super::hash::item_key`]'s `Float` arm
+/// hashes through [`crate::lcs::mix_float_bits`] before the bits reach
+/// [`FxHasher`], and `hashbrown` picks a bucket from a hash's *low* bits.
+#[test]
+fn float_hash_buckets_stay_distinct_and_grow_linearly_with_member_count() {
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
+
+    let low_bucket = |n: usize, half: bool| -> u32 {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "n stays well under 2^53 here; exactness is not the point of the probe"
+        )]
+        let value = n as f64 + if half { 0.5 } else { 0.0 };
+        let key = item_key(&json!(value));
+        let mut hasher = FxHasher::default();
+        key.hash(&mut hasher);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "only the low 32 bits are the bucket proxy under test"
+        )]
+        {
+            hasher.finish() as u32
+        }
+    };
+
+    for (name, half) in [("integral", false), ("half-integer", true)] {
+        let k = 10_000;
+        let distinct_count = |count: usize| -> usize {
+            (0..count)
+                .map(|n| low_bucket(n, half))
+                .collect::<HashSet<_>>()
+                .len()
+        };
+
+        let distinct_1x = distinct_count(k);
+        let distinct_2x = distinct_count(2 * k);
+
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "k is a small test constant; the ratio only needs two significant figures"
+        )]
+        {
+            assert!(
+                (distinct_1x as f64) > 0.99 * (k as f64),
+                "{name} floats: only {distinct_1x}/{k} distinct hash buckets at K \
+                 — keys are colliding in their interning table"
+            );
+            assert!(
+                (distinct_2x as f64) > 0.99 * (2.0 * k as f64),
+                "{name} floats: only {distinct_2x}/{} distinct hash buckets at 2K \
+                 — keys are colliding in their interning table",
+                2 * k
+            );
+
+            let ratio = distinct_2x as f64 / distinct_1x as f64;
+            assert!(
+                (1.9..=2.1).contains(&ratio),
+                "{name} floats: distinct-bucket count did not grow linearly \
+                 with K (K->2K ratio {ratio:.3}, distinct_1x={distinct_1x}, distinct_2x={distinct_2x})"
+            );
+        }
+    }
+}
+
+// --- distance-memo repetition collision ---
+
+/// Two sibling subtrees whose list elements share an `ItemKey` (order- and
+/// repetition-insensitive) but differ in element repetition have different
+/// distances, so the distance memo must not hand one's cached answer to the
+/// other. `[3, 4]` and `[3]*8 + [4]*8` both key as the set `{3, 4}`; paired
+/// against `[9, 8]`, the short list is close enough to pair (a whole-element
+/// `values_changed`) while the long list is not (it recurses).
+#[test]
+fn memo_does_not_conflate_lists_sharing_itemkey_but_differing_repetition() {
+    let short = json!([3, 4]);
+    let long = json!([3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4]);
+    let other = json!([9, 8]);
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 1_000,
+    };
+
+    // Both key orders: the memo processes candidates in order, so a short-then-
+    // long and a long-then-short sibling arrangement stress it differently.
+    for (p_a, q_a) in [(&short, &long), (&long, &short)] {
+        let a = cv(&json!({"p": [p_a], "q": [q_a]}));
+        let b = cv(&json!({"p": [other], "q": [other]}));
+
+        let memoized = crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::new())
+            .expect("memoized diff succeeds");
+        let unmemoized =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::disabled())
+                .expect("unmemoized diff succeeds");
+        assert_eq!(
+            memoized.to_json_value().to_string(),
+            unmemoized.to_json_value().to_string(),
+            "the memo changed the report for arrangement p={p_a}, q={q_a}"
+        );
+
+        // No cross-key contamination: the whole diff must equal the two
+        // sibling subtrees diffed in isolation and merged.
+        let mut isolated = crate::diff::diff_with_options(
+            &cv(&json!({"p": [p_a]})),
+            &cv(&json!({"p": [other]})),
+            &opts,
+        )
+        .expect("p-only diff succeeds");
+        let q_only = crate::diff::diff_with_options(
+            &cv(&json!({"q": [q_a]})),
+            &cv(&json!({"q": [other]})),
+            &opts,
+        )
+        .expect("q-only diff succeeds");
+        isolated.merge(q_only);
+        assert_eq!(
+            memoized.to_json_value(),
+            isolated.to_json_value(),
+            "sibling subtrees contaminated each other for arrangement p={p_a}, q={q_a}"
+        );
+    }
+}
+
+/// A list of 1..12 elements drawn from a tiny scalar alphabet, so distinct
+/// lists frequently share an `ItemKey` (the deduplicated set of members) while
+/// differing in element repetition.
+fn arb_repeating_list() -> impl Strategy<Value = serde_json::Value> {
+    prop::collection::vec(
+        prop_oneof![Just(json!(0)), Just(json!(1)), Just(json!(2))],
+        1..12,
+    )
+    .prop_map(serde_json::Value::Array)
+}
+
+/// An `(a, b)` pair engineered to stress the distance memo: `a` is a dict of
+/// four sibling keys each wrapping its own repetition-varying list, while `b`
+/// gives *every* sibling the same "other" list. So each sibling pairs its inner
+/// list against one shared other list, and two siblings whose lists share a
+/// member set (frequent over a 3-symbol alphabet) present the same `(removed,
+/// added)` `ItemKey` pair with different distances. The list lengths make
+/// those distances straddle the 0.3 cutoff.
+fn arb_repeating_siblings_pair() -> impl Strategy<Value = (serde_json::Value, serde_json::Value)> {
+    let siblings = (
+        arb_repeating_list(),
+        arb_repeating_list(),
+        arb_repeating_list(),
+        arb_repeating_list(),
+    );
+    (siblings, arb_repeating_list()).prop_map(|((p, q, r, s), other)| {
+        let wrap = |v: serde_json::Value| serde_json::Value::Array(vec![v]);
+        let a = serde_json::json!({
+            "p": wrap(p),
+            "q": wrap(q),
+            "r": wrap(r),
+            "s": wrap(s),
+        });
+        let b = serde_json::json!({
+            "p": wrap(other.clone()),
+            "q": wrap(other.clone()),
+            "r": wrap(other.clone()),
+            "s": wrap(other),
+        });
+        (a, b)
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(800))]
+
+    /// Over dicts of single-element lists wrapping repetition-varying lists — the shape
+    /// where sibling candidates share an `ItemKey` but not a distance, and
+    /// where those distances straddle the 0.3 pairing cutoff — the distance memo
+    /// must still change no decision.
+    #[test]
+    fn memo_neutral_on_repetition_varying_siblings(
+        (a, b) in arb_repeating_siblings_pair(),
+    ) {
+        let a = crate::value::Value::from(a);
+        let b = crate::value::Value::from(b);
+        let opts = DiffOptions {
+            ignore_order: true,
+            max_depth: 1_000,
+        };
+        let with = crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::new());
+        let without =
+            crate::diff::diff_with_options_memo(&a, &b, &opts, &IgnoreOrderMemo::disabled());
+        prop_assert_eq!(
+            with.map(|report| report.to_json_value().to_string()),
+            without.map(|report| report.to_json_value().to_string()),
+        );
+    }
+}
+
+/// The distance memo's two caching conditions are each pinned: a scalar-only
+/// `ignore_order` diff caches nothing (scalar distances never recurse, so
+/// `is_container` gates them out), and a `disabled()` memo caches nothing
+/// regardless of shape (so the with/without differential tests exercise the
+/// uncached path).
+#[test]
+fn distance_memo_only_caches_container_pairs_when_enabled() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        max_depth: 1_000,
+    };
+
+    // Scalars never recurse, so an enabled memo caches nothing for them.
+    let scalar_memo = IgnoreOrderMemo::new();
+    crate::diff::diff_with_options_memo(
+        &cv(&json!([1, 2, 3])),
+        &cv(&json!([3, 4, 5])),
+        &opts,
+        &scalar_memo,
+    )
+    .expect("scalar diff succeeds");
+    assert_eq!(
+        scalar_memo.cache_len(),
+        0,
+        "scalar-only ignore_order diff must not populate the distance cache"
+    );
+
+    // Container pairs do populate an enabled memo...
+    let container_a = cv(&json!([[1, 2], [3, 4], "anchor"]));
+    let container_b = cv(&json!(["anchor", [1, 9], [3, 8]]));
+    let enabled_memo = IgnoreOrderMemo::new();
+    crate::diff::diff_with_options_memo(&container_a, &container_b, &opts, &enabled_memo)
+        .expect("container diff succeeds");
+    assert!(
+        enabled_memo.cache_len() > 0,
+        "container ignore_order diff should populate the distance cache"
+    );
+
+    // ...but a disabled memo caches nothing, whatever the shape.
+    let disabled_memo = IgnoreOrderMemo::disabled();
+    crate::diff::diff_with_options_memo(&container_a, &container_b, &opts, &disabled_memo)
+        .expect("container diff succeeds");
+    assert_eq!(
+        disabled_memo.cache_len(),
+        0,
+        "a disabled memo must never populate the distance cache"
+    );
+}
+
+// --- DistKey hashing stack safety ---
+
+/// [`DistKey`]'s `Hash` walks the value with an explicit stack, never native
+/// recursion, so hashing a distance-cache key can never overflow the native
+/// stack however deep the value — the same posture the engine's `Value`
+/// `Drop`/`PartialEq` hold. Isolated from the key's own value clone (which,
+/// like the report's clones, recurses): the chain is built iteratively and
+/// wrapped without copying, so the only thing exercised on the tiny 256 KiB
+/// stack is the hash.
+#[test]
+fn dist_key_hashing_does_not_overflow_the_native_stack() {
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            const DEPTH: usize = 200_000;
+            let mut value = cv(&json!(0));
+            for _ in 0..DEPTH {
+                value = carr(vec![value]);
+            }
+            let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&key, &mut hasher);
+            let _ = std::hash::Hasher::finish(&hasher);
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("DistKey hashing completes on a small stack");
+}
+
+/// The same memo-driven `ignore_order` path at the default budget on an
+/// ordinary main-thread-sized (8 MiB) stack — the common case a caller hits
+/// without raising `max_depth` or spawning a special thread. (Rust runs each
+/// `#[test]` on a 2 MiB worker thread, smaller than a real main thread, so the
+/// probe sizes the stack to an ordinary 8 MiB rather than relying on the test
+/// harness's own reduced default.)
+#[test]
+fn ignore_order_memo_at_default_budget_on_plain_thread() {
+    let handle = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let build = |leaf: i64| {
+                let mut value = cv(&json!(leaf));
+                for _ in 0..200 {
+                    value = carr(vec![value]);
+                }
+                value
+            };
+            let opts = DiffOptions {
+                ignore_order: true,
+                max_depth: crate::diff::DEFAULT_MAX_DEPTH,
+            };
+            let report = crate::diff::diff_with_options(&build(1), &build(2), &opts)
+                .expect("default-budget ignore_order diff succeeds");
+            assert!(!report.is_empty());
+        })
+        .expect("probe thread spawns");
+    handle
+        .join()
+        .expect("default-budget ignore_order diff completes on an ordinary stack");
+}
+
+/// The distance-cache key's hash of a value, for the agreement tests below.
+fn dist_hash(value: &CValue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let key = super::hash::DistKey::from_rc(std::rc::Rc::new(value.clone()));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `DistKey`'s `Hash` must agree with its `Eq` (equal values hash equal), or the
+/// distance memo silently stops hitting and the pairing goes exponential. The
+/// explicit-stack rewrite is the usual place this breaks (a differing child
+/// visit order, or a length hashed at the wrong spot), so pin the equal-but-
+/// differently-built cases the value model treats as equal: signed-zero and
+/// integral floats, sets/frozensets whose members arrive in different insertion
+/// orders (`SetItems` canonicalizes them equal), and datetimes equal by instant
+/// though built with different offsets (a naive value read as UTC, and an
+/// aware pair shifted by its offset to the same moment).
+#[test]
+fn dist_key_hash_agrees_with_equality_on_tricky_equal_values() {
+    let float = |f: f64| CValue::Number(crate::value::Number::from_f64(f));
+    let nested_set = |order: [i64; 3]| {
+        CValue::Set(SetItems::new(vec![
+            ctup(&[json!(order[0])]),
+            ctup(&[json!(order[1])]),
+            ctup(&[json!(order[2])]),
+        ]))
+    };
+    let pairs: &[(CValue, CValue)] = &[
+        // Signed zero: Value equality treats +0.0 == -0.0.
+        (float(0.0), float(-0.0)),
+        // A set built directly from both signed zeros dedups to the same
+        // single-member set regardless of which sign came first (`SetItems::new`
+        // folds the two into one canonical slot, matching a real Python set).
+        (
+            CValue::Set(SetItems::new(vec![float(0.0), float(-0.0)])),
+            CValue::Set(SetItems::new(vec![float(-0.0)])),
+        ),
+        // Set members in different insertion orders canonicalize equal.
+        (
+            cset(&[json!(1), json!(2), json!(3)]),
+            cset(&[json!(3), json!(1), json!(2)]),
+        ),
+        (
+            cfrozen(&[json!("b"), json!("a")]),
+            cfrozen(&[json!("a"), json!("b")]),
+        ),
+        // A set of tuples, members reordered: exercises the nested walk.
+        (nested_set([1, 2, 3]), nested_set([3, 2, 1])),
+        // A naive datetime (read as UTC) and an aware one at the same instant:
+        // Value equality compares datetimes by instant.
+        (cdt(2024, 6, 1, None), cdt(2024, 6, 1, Some(0))),
+        // Two aware datetimes at the same instant but different wall clock and
+        // offset: 12:00+00:00 == 13:00+01:00.
+        (
+            cdt_at(2024, 6, 1, 12, 0, 0, 0, Some(0)),
+            cdt_at(2024, 6, 1, 13, 0, 0, 0, Some(3600)),
+        ),
+    ];
+    for (a, b) in pairs {
+        assert_eq!(a, b, "test inputs must be Value-equal: {a:?} vs {b:?}");
+        assert_eq!(
+            dist_hash(a),
+            dist_hash(b),
+            "equal values must hash equal: {a:?} vs {b:?}"
+        );
+    }
+}
+
+/// `NaN` cannot appear among the pairs above: no two `NaN`s are ever
+/// `Value`-equal (`NaN != NaN`, matching Python). Pinned instead is the coarser
+/// hash: `DistKey`'s `Hash` collapses every `NaN` bit pattern onto one bucket
+/// (`crate::ignore_order::hash::number_key`), so two distinct, never-`Value`-equal
+/// `NaN`s hash equal here, while `DistKey`'s `Eq` is `Value`'s real equality and
+/// still tells them apart.
+#[test]
+fn dist_key_hash_collision_on_distinct_nans_never_becomes_equality() {
+    let nan_a = CValue::Number(crate::value::Number::from_f64(f64::NAN));
+    let nan_b = CValue::Number(crate::value::Number::from_f64(-f64::NAN));
+
+    assert_ne!(nan_a, nan_b, "two NaN values are never Value-equal");
+    assert_eq!(
+        dist_hash(&nan_a),
+        dist_hash(&nan_b),
+        "NaN's dist-key hash deliberately ignores sign/payload"
+    );
+
+    let key_a = super::hash::DistKey::new(&nan_a);
+    let key_b = super::hash::DistKey::new(&nan_b);
+    assert!(
+        key_a != key_b,
+        "a hash collision must not make DistKey::eq treat two distinct NaNs as the same cache entry"
+    );
+}
+
+/// An `arbitrary` compact value covering every equality class the distance-key
+/// hash must respect — including the ones JSON cannot express, so they are
+/// actually generated: tuples, sets, frozensets, datetimes (naive and aware),
+/// dates, floats (signed zero and integral values among them), and containers
+/// of the subclass `Sub`.
+fn arb_cvalue() -> impl Strategy<Value = CValue> {
+    arb_cleaf().prop_recursive(5, 40, 4, |inner| {
+        let container = prop_oneof![
+            prop::collection::vec(inner.clone(), 0..4).prop_map(carr),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(ctuple),
+            prop::collection::vec(inner.clone(), 0..4).prop_map(|v| CValue::Set(SetItems::new(v))),
+            prop::collection::vec(inner.clone(), 0..4)
+                .prop_map(|v| CValue::FrozenSet(SetItems::new(v))),
+            prop::collection::vec(("[a-c]", inner), 0..3)
+                .prop_map(|entries| crate::value::Builder::new().object(entries)),
+        ];
+        (container, any::<bool>()).prop_map(|(value, subclass)| {
+            if subclass {
+                with_class(&value, Some(sub()))
+            } else {
+                value
+            }
+        })
+    })
+}
+
+/// `value` re-typed as `class` (`None`: base type); scalars unchanged.
+fn with_class(value: &CValue, class: Option<std::sync::Arc<str>>) -> CValue {
+    let typed =
+        |items: &[CValue]| crate::value::Typed::with_class_name(items.into(), class.clone());
+    match value {
+        CValue::Array(items) => CValue::Array(typed(items)),
+        CValue::Tuple(items) => CValue::Tuple(typed(items)),
+        CValue::Set(items) => CValue::Set(items.clone().with_type_name(class)),
+        CValue::FrozenSet(items) => CValue::FrozenSet(items.clone().with_type_name(class)),
+        CValue::Object(map) => CValue::Object(
+            map.clone()
+                .with_dict_class(class.map(|name| (name, std::sync::Arc::from("1")))),
+        ),
+        scalar => scalar.clone(),
+    }
+}
+
+/// [`arb_cvalue`]'s scalar leaves.
+fn arb_cleaf() -> impl Strategy<Value = CValue> {
+    let arb_datetime = (
+        2000i32..2025,
+        1u8..=12,
+        1u8..=28,
+        0u8..24,
+        0u8..60,
+        0u8..60,
+        prop_oneof![
+            Just(None),
+            Just(Some(0)),
+            Just(Some(3600)),
+            Just(Some(-3600))
+        ],
+    )
+        .prop_map(|(y, mo, d, h, mi, s, off)| cdt_at(y, mo, d, h, mi, s, 0, off))
+        .prop_flat_map(|datetime| {
+            prop_oneof![Just(datetime.clone()), Just(csub_datetime(&datetime))]
+        });
+    let arb_date = (2000i32..2025, 1u8..=12, 1u8..=28).prop_map(|(y, m, d)| cdate(y, m, d));
+    // NaN is excluded: it is never `Value`-equal to its twin.
+    let arb_float = prop_oneof![
+        Just(0.0f64),
+        Just(-0.0f64),
+        Just(1.0f64),
+        Just(2.0f64),
+        Just(f64::INFINITY),
+        Just(f64::NEG_INFINITY),
+        any::<f64>(),
+    ]
+    .prop_filter_map("not NaN", |f| {
+        (!f.is_nan()).then(|| CValue::Number(crate::value::Number::from_f64(f)))
+    });
+    prop_oneof![
+        Just(CValue::Null),
+        any::<bool>().prop_map(CValue::Bool),
+        any::<i64>().prop_map(|i| CValue::Number(crate::value::Number::from_i64(i))),
+        arb_float,
+        "[a-z]{0,3}".prop_map(|s| CValue::Str(s.into())),
+        arb_datetime,
+        arb_date,
+    ]
+}
+
+/// Rebuilds `value` into a twin that is `Value`-equal but structurally
+/// different: datetimes re-expressed at the same instant (not below a set),
+/// signed zeros flipped, set/dict entries reversed.
+fn structural_twin(value: &CValue, in_set: bool) -> CValue {
+    let class = crate::value::class_name(value).map(std::sync::Arc::from);
+    let twin = match value {
+        CValue::Array(items) => carr(
+            items
+                .iter()
+                .map(|item| structural_twin(item, in_set))
+                .collect::<Vec<_>>(),
+        ),
+        CValue::Tuple(items) => ctuple(
+            items
+                .iter()
+                .map(|item| structural_twin(item, in_set))
+                .collect::<Vec<_>>(),
+        ),
+        CValue::Set(items) => {
+            let mut members: Vec<CValue> = items
+                .iter()
+                .map(|item| structural_twin(item, true))
+                .collect();
+            members.reverse();
+            CValue::Set(SetItems::new(members))
+        }
+        CValue::FrozenSet(items) => {
+            let mut members: Vec<CValue> = items
+                .iter()
+                .map(|item| structural_twin(item, true))
+                .collect();
+            members.reverse();
+            CValue::FrozenSet(SetItems::new(members))
+        }
+        CValue::Object(map) => {
+            // Keys are carried over unchanged (not "twinned"); only child values get reconstructed.
+            let mut entries: Vec<(ObjectKey, CValue)> = map
+                .iter()
+                .map(|(key, child)| (key.clone(), structural_twin(child, in_set)))
+                .collect();
+            entries.reverse();
+            crate::value::Builder::new().object_with_keys(entries)
+        }
+        CValue::DateTime(typed) if !in_set => {
+            let dt = typed.value();
+            let date = dt.date();
+            let twin = match dt.utc_offset_seconds() {
+                None => cdt_at(
+                    date.year(),
+                    date.month(),
+                    date.day(),
+                    dt.hour(),
+                    dt.minute(),
+                    dt.second(),
+                    dt.microsecond(),
+                    Some(0),
+                ),
+                Some(offset) => {
+                    let (hour, offset) = if dt.hour() < 23 {
+                        (dt.hour() + 1, offset + 3600)
+                    } else {
+                        (dt.hour() - 1, offset - 3600)
+                    };
+                    cdt_at(
+                        date.year(),
+                        date.month(),
+                        date.day(),
+                        hour,
+                        dt.minute(),
+                        dt.second(),
+                        dt.microsecond(),
+                        Some(offset),
+                    )
+                }
+            };
+            let CValue::DateTime(rewritten) = &twin else {
+                unreachable!("cdt_at builds a datetime")
+            };
+            CValue::DateTime(crate::value::Typed::with_class_name(
+                rewritten.value(),
+                typed.class_name().map(std::sync::Arc::from),
+            ))
+        }
+        CValue::Number(n) if n.is_f64() => {
+            let f = n.as_f64().expect("is_f64 guarantees as_f64");
+            let flipped = if f == 0.0 { -f } else { f };
+            CValue::Number(crate::value::Number::from_f64(flipped))
+        }
+        scalar => scalar.clone(),
+    };
+    with_class(&twin, class)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// Over generated nested shapes spanning every equality class (see
+    /// `arb_cvalue`), a value hashes identically to a [`structural_twin`] that
+    /// is `Value`-equal but structurally different: an equal-instant datetime
+    /// at a different offset and a sign-flipped zero (the two places `Value`
+    /// equality is coarser than structure), plus reversed set/dict order.
+    /// Guards the `DistKey` `Hash`/`Eq` agreement the memo's soundness depends on.
+    #[test]
+    fn dist_key_hash_equal_for_equal_values(value in arb_cvalue()) {
+        let twin = structural_twin(&value, false);
+        prop_assert_eq!(&value, &twin);
+        prop_assert_eq!(dist_hash(&value), dist_hash(&twin));
+
+        // A set of the value wrapped, built from two orders, stays equal.
+        let s1 = CValue::Set(SetItems::new(vec![value.clone(), CValue::Null, cv(&json!("z"))]));
+        let s2 = CValue::Set(SetItems::new(vec![cv(&json!("z")), value, CValue::Null]));
+        prop_assert_eq!(&s1, &s2);
+        prop_assert_eq!(dist_hash(&s1), dist_hash(&s2));
+    }
+}
+
+/// One leaf's change in [`perturb`].
+#[derive(Clone, Debug)]
+enum Edit {
+    Keep,
+    /// A same-type change: a string's first letter, a number plus one, a
+    /// flipped bool, else [`structural_twin`]'s equal-valued rewrite.
+    Tweak,
+    Replace(CValue),
+}
+
+fn tweak(leaf: &CValue) -> CValue {
+    use crate::value::Number;
+    match leaf {
+        CValue::Str(text) => {
+            let mut bytes = text.as_bytes().to_vec();
+            match bytes.first_mut() {
+                Some(first) => *first = b'a' + (first.wrapping_sub(b'a') + 1) % 26,
+                None => bytes.push(b'a'),
+            }
+            CValue::Str(String::from_utf8_lossy(&bytes).into_owned().into())
+        }
+        CValue::Number(n) => CValue::Number(match n.as_i64() {
+            Some(i) if !n.is_f64() => Number::from_i64(i.wrapping_add(1)),
+            _ => Number::from_f64(n.as_f64().map_or(0.0, |f| f + 1.0)),
+        }),
+        CValue::Bool(b) => CValue::Bool(!b),
+        other => structural_twin(other, false),
+    }
+}
+
+/// `value` with its leaves changed in walk order by `edits`.
+fn perturb(value: &CValue, edits: &mut impl Iterator<Item = Edit>) -> CValue {
+    let mut all = |items: &[CValue]| items.iter().map(|item| perturb(item, edits)).collect();
+    let class = crate::value::class_name(value).map(std::sync::Arc::from);
+    let edited = match value {
+        CValue::Array(items) => carr(all(items)),
+        CValue::Tuple(items) => ctuple(all(items)),
+        CValue::Set(items) => CValue::Set(SetItems::new(all(items))),
+        CValue::FrozenSet(items) => CValue::FrozenSet(SetItems::new(all(items))),
+        CValue::Object(map) => crate::value::Builder::new().object_with_keys(
+            map.iter()
+                .map(|(key, child)| (key.clone(), perturb(child, edits)))
+                .collect(),
+        ),
+        leaf => match edits.next() {
+            Some(Edit::Tweak) => tweak(leaf),
+            Some(Edit::Replace(new)) => new,
+            Some(Edit::Keep) | None => leaf.clone(),
+        },
+    };
+    with_class(&edited, class)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    /// `count_diff_leaves` counts what the `Report` of the same diff measures,
+    /// for an independent pair, a value against an edited copy, and each
+    /// under a shared sibling in a list and in a dict.
+    #[test]
+    fn count_diff_leaves_matches_the_report_of_the_same_diff(
+        a in arb_cvalue(),
+        b in arb_cvalue(),
+        edits in prop::collection::vec(
+            prop_oneof![
+                Just(Edit::Keep),
+                Just(Edit::Tweak),
+                arb_cleaf().prop_map(Edit::Replace),
+            ],
+            1..6,
+        ),
+        sibling in arb_cvalue(),
+        ignore_order in any::<bool>(),
+    ) {
+        let opts = DiffOptions {
+            ignore_order,
+            ..DiffOptions::default()
+        };
+        let edited = perturb(&a, &mut edits.into_iter().cycle());
+        let in_list = |value: &CValue| carr(vec![value.clone(), sibling.clone()]);
+        let in_dict = |value: &CValue| {
+            crate::value::Builder::new().object(vec![("k", value.clone()), ("s", sibling.clone())])
+        };
+        for (old, new) in [(&a, &b), (&a, &edited)] {
+            for (old, new) in [
+                (old.clone(), new.clone()),
+                (in_list(old), in_list(new)),
+                (in_dict(old), in_dict(new)),
+            ] {
+                let mirror =
+                    super::distance::count_diff_leaves(&old, &new, 0, &opts, &IgnoreOrderMemo::new());
+                let report = crate::diff::diff_with_options(&old, &new, &opts)
+                    .map(|report| report.distance_leaf_length())
+                    .map_err(Box::new);
+                prop_assert_eq!(mirror, report);
+            }
+        }
+    }
+}
+
+#[test]
+fn item_length_of_a_custom_object_is_its_attribute_count_not_its_values() {
+    // `_get_item_length`'s `else`/`__dict__` branch counts an object's
+    // attribute *names* (one each), never recursing into the values, unlike a
+    // `dict` (the `Mapping` branch). This object has two attributes whose
+    // values sum to four leaves as a dict would count them, so the two rules
+    // give different answers.
+    let object = ccustom("A", json!({"x": [1, 2, 3], "y": 5}).as_object().unwrap());
+    assert_eq!(super::distance::item_length(&object), 2);
+
+    // The same entries as a plain `dict` are counted the other way: the
+    // `Mapping` branch sums the values (three list items plus one scalar).
+    let dict = cv(&json!({"x": [1, 2, 3], "y": 5}));
+    assert_eq!(super::distance::item_length(&dict), 4);
+}
+
+/// A custom object `A` with `attrs` and explicit `lengths`.
+fn ccustom_with(attrs: &serde_json::Value, lengths: crate::value::ObjectLengths) -> CValue {
+    CValue::Object(
+        crate::test_support::cobj(attrs.as_object().unwrap()).into_class(
+            crate::value::ObjectKind::CustomObject,
+            std::sync::Arc::from("A"),
+            std::sync::Arc::from("A"),
+            lengths,
+            Vec::new(),
+            None,
+        ),
+    )
+}
+
+/// An opaque token of type `Decimal` for the Python object `identity`.
+fn copaque(identity: &str) -> CValue {
+    crate::value::Builder::new().opaque(
+        std::sync::Arc::from("Decimal"),
+        std::sync::Arc::from(identity),
+    )
+}
+
+#[test]
+fn item_length_of_a_custom_object_is_its_dict_len_not_its_attribute_count() {
+    let lengths = crate::value::ObjectLengths {
+        dict_len: 4,
+        hidden_count: 3,
+        type_len: 12,
+    };
+    let object = ccustom_with(&json!({"name": "B", "value": 2}), lengths);
+    assert_eq!(
+        [
+            super::distance::item_length(&object),
+            super::distance::rough_length(&object),
+            super::distance::type_change_leaf_length(&cv(&json!(1)), &object),
+        ],
+        [4, 1 + 3 + 2 + 2, 12 + 4]
+    );
+}
+
+#[test]
+fn a_collapsed_custom_object_pair_counts_the_new_objects_dict_len() {
+    let lengths = |dict_len| crate::value::ObjectLengths {
+        dict_len,
+        ..Default::default()
+    };
+    let a = ccustom_with(&json!({"x": 1}), lengths(7));
+    let b = ccustom_with(&json!({"y": 1}), lengths(5));
+    let (CValue::Object(a), CValue::Object(b)) = (&a, &b) else {
+        unreachable!("both are objects");
+    };
+    let opts = DiffOptions::default();
+    assert_eq!(
+        super::distance::count_object_diff_leaves(a, b, 0, &opts, &IgnoreOrderMemo::new()).unwrap(),
+        5
+    );
+}
+
+#[test]
+fn an_opaque_token_equals_only_a_token_for_the_same_object() {
+    let opts = DiffOptions {
+        ignore_order: true,
+        ..DiffOptions::default()
+    };
+    let same = crate::diff::diff_with_options(
+        &CValue::Array(vec![copaque("1")].into_boxed_slice().into()),
+        &CValue::Array(vec![copaque("1")].into_boxed_slice().into()),
+        &opts,
+    )
+    .unwrap();
+    let different = crate::diff::diff_with_options(
+        &CValue::Array(vec![copaque("1")].into_boxed_slice().into()),
+        &CValue::Array(vec![copaque("2")].into_boxed_slice().into()),
+        &opts,
+    )
+    .unwrap();
+    assert_eq!((same.is_empty(), different.is_empty()), (true, false));
+}
+
+#[test]
+fn an_opaque_token_keys_by_its_identity_apart_from_an_object_of_that_name() {
+    let memo = IgnoreOrderMemo::new();
+    let key = |value: &CValue| super::hash::item_key(value, &memo);
+    let named_like_the_identity = ccustom("1", json!({}).as_object().unwrap());
+    assert_ne!(key(&copaque("1")), key(&copaque("2")));
+    assert_ne!(key(&copaque("1")), key(&named_like_the_identity));
+    assert_eq!(key(&copaque("1")), key(&copaque("1")));
+}
+
+/// A custom object `A` holding `entries`, the names in `class_attributes` read
+/// from its class.
+fn cobject_with_class_attributes(
+    entries: Vec<(&str, CValue)>,
+    class_attributes: &[&str],
+) -> CValue {
+    let entries = entries
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from(name))),
+                value,
+            )
+        })
+        .collect();
+    crate::value::Builder::new().custom_object(
+        entries,
+        std::sync::Arc::from("A"),
+        std::sync::Arc::from("A"),
+        crate::value::ObjectLengths::default(),
+        class_attributes
+            .iter()
+            .map(|name| std::sync::Arc::from(*name))
+            .collect(),
+        None,
+    )
+}
+
+#[test]
+fn rough_length_leaves_out_class_attributes() {
+    let object = cobject_with_class_attributes(
+        vec![("x", cv(&json!(1))), ("shared", cv(&json!([1, 2])))],
+        &["shared"],
+    );
+    assert_eq!(super::distance::rough_length(&object), 1 + 1 + 1);
+}
+
+#[test]
+fn rendered_leaves_out_class_attributes_at_any_depth_and_keeps_container_shapes() {
+    let inner = cobject_with_class_attributes(
+        vec![("y", cv(&json!(2))), ("token", copaque("1"))],
+        &["token"],
+    );
+    let value = carr(vec![ctuple(vec![cobject_with_class_attributes(
+        vec![
+            ("x", inner),
+            ("z", cv(&json!(3))),
+            ("shared", cv(&json!(4))),
+        ],
+        &["shared", "z"],
+    )])]);
+    let expected = carr(vec![ctuple(vec![cobject_with_class_attributes(
+        vec![(
+            "x",
+            cobject_with_class_attributes(vec![("y", cv(&json!(2)))], &[]),
+        )],
+        &[],
+    )])]);
+    assert_eq!(crate::value::rendered(&value), Ok(expected));
+}
+
+#[test]
+fn rendered_names_the_path_type_and_identity_of_every_opaque_token_left_in_the_render() {
+    let value = carr(vec![
+        cv(&json!(0)),
+        cobject_with_class_attributes(vec![("price", copaque("1"))], &[]),
+        copaque("2"),
+    ]);
+    let unrendered: Vec<_> = crate::value::rendered(&value)
+        .unwrap_err()
+        .into_iter()
+        .map(|token| {
+            (
+                crate::path::render_path(&token.path).to_string(),
+                token.type_name,
+                token.identity,
+            )
+        })
+        .collect();
+    let expected = |path: &str, identity: &str| {
+        (
+            path.to_string(),
+            "Decimal".to_string(),
+            identity.to_string(),
+        )
+    };
+    assert_eq!(
+        unrendered,
+        vec![expected("root[1].price", "1"), expected("root[2]", "2")]
+    );
+}
+
+/// A custom object `A` holding `x`, converted from the Python object at `instance`.
+fn cobject_at(x: i64, instance: Option<usize>) -> CValue {
+    crate::value::Builder::new().custom_object(
+        vec![(
+            ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+            cv(&json!(x)),
+        )],
+        std::sync::Arc::from("A"),
+        std::sync::Arc::from("A"),
+        crate::value::ObjectLengths::default(),
+        Vec::new(),
+        instance,
+    )
+}
+
+/// The dict `{"k": value}`.
+fn cdict_holding(value: CValue) -> CValue {
+    crate::value::Builder::new().object(vec![("k", value)])
+}
+
+fn ccycle() -> CValue {
+    crate::value::Builder::new().cycle(std::sync::Arc::from("A"), std::sync::Arc::from("9"))
+}
+
+#[test]
+fn two_objects_from_one_python_object_report_nothing_and_two_from_different_ones_are_walked() {
+    let opts = DiffOptions::default();
+    let same =
+        crate::diff::diff_with_options(&cobject_at(1, Some(7)), &cobject_at(2, Some(7)), &opts);
+    let different =
+        crate::diff::diff_with_options(&cobject_at(1, Some(7)), &cobject_at(2, Some(8)), &opts);
+    let unknown = crate::diff::diff_with_options(&cobject_at(1, None), &cobject_at(2, None), &opts);
+    assert_eq!(
+        (
+            same.unwrap().finding_count(),
+            different.unwrap().finding_count(),
+            unknown.unwrap().finding_count()
+        ),
+        (0, 1, 1)
+    );
+}
+
+#[test]
+fn a_cycle_token_reports_nothing_on_the_first_side_and_is_compared_on_the_second() {
+    let opts = DiffOptions::default();
+    let count = |a: &CValue, b: &CValue| {
+        crate::diff::diff_with_options(&carr(vec![a.clone()]), &carr(vec![b.clone()]), &opts)
+            .unwrap()
+            .finding_count()
+    };
+    assert_eq!(
+        (
+            count(&ccycle(), &cv(&json!(1))),
+            count(&cv(&json!(1)), &ccycle()),
+            count(&cv(&json!(1)), &cv(&json!(2)))
+        ),
+        (0, 1, 1)
+    );
+}
+
+#[test]
+fn a_first_side_cycle_token_or_one_python_object_counts_no_distance() {
+    let memo = IgnoreOrderMemo::new();
+    let opts = DiffOptions::default();
+    let leaves =
+        |a: &CValue, b: &CValue| super::distance::count_diff_leaves(a, b, 0, &opts, &memo).unwrap();
+    assert_eq!(
+        (
+            leaves(&ccycle(), &cv(&json!([1, 2]))),
+            leaves(&cv(&json!([1, 2])), &ccycle()),
+            leaves(&cobject_at(1, Some(7)), &cobject_at(2, Some(7))),
+            leaves(&cobject_at(1, Some(7)), &cobject_at(2, Some(8))),
+        ),
+        (0, 1, 0, 1)
+    );
+}
+
+/// Diffs `a` and `b`, resolving each token whose identity `table` lists as its
+/// value; returns the report and the identities the resolver was called with.
+fn diff_resolving(
+    a: &CValue,
+    b: &CValue,
+    opts: &DiffOptions,
+    table: &[(&str, CValue)],
+) -> (crate::report::Report, Vec<String>) {
+    let mut calls = Vec::new();
+    let mut resolver = |identity: &str| {
+        calls.push(identity.to_string());
+        table
+            .iter()
+            .find(|(key, _)| *key == identity)
+            .map(|(_, value)| crate::diff::Resolution::Borrowed(value))
+    };
+    let report = crate::diff::diff_with_resolver(a, b, opts, &mut resolver).unwrap();
+    (report, calls)
+}
+
+#[test]
+fn an_opaque_token_is_compared_as_its_resolved_value() {
+    let table = [("1", cv(&json!([1, 2])))];
+    let opts = DiffOptions::default();
+    let diff = |a: &CValue, b: &CValue| diff_resolving(a, b, &opts, &table).0.to_json_value();
+    assert_eq!(
+        (
+            diff(&cv(&json!({"k": [1, 2]})), &cdict_holding(copaque("1"))),
+            diff(&cdict_holding(copaque("1")), &cv(&json!({"k": [1, 3]}))),
+            diff(&copaque("1"), &copaque("1")),
+        ),
+        (
+            json!({}),
+            json!({"values_changed": {"root['k'][1]": {"new_value": 3, "old_value": 2}}}),
+            json!({}),
+        )
+    );
+}
+
+#[test]
+fn a_resolved_token_counts_the_distance_of_its_value() {
+    let value = cv(&json!([1, 2]));
+    let mut resolver = |_: &str| Some(crate::diff::Resolution::Borrowed(&value));
+    let memo = IgnoreOrderMemo::with_resolver(&mut resolver);
+    let opts = DiffOptions::default();
+    assert_eq!(
+        super::distance::count_diff_leaves(&copaque("1"), &cv(&json!([1, 3])), 0, &opts, &memo)
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn a_cycle_token_on_the_first_side_against_a_dict_reports_nothing() {
+    let report = crate::diff::diff_with_options(
+        &carr(vec![ccycle()]),
+        &carr(vec![cv(&json!({"k": 1}))]),
+        &DiffOptions::default(),
+    )
+    .unwrap();
+    assert!(report.is_empty());
+}
+
+#[test]
+fn two_tokens_for_one_object_are_equal_without_resolving_them() {
+    let holding = |b: i64| {
+        crate::value::Builder::new().object(vec![("token", copaque("1")), ("b", cv(&json!(b)))])
+    };
+    let (report, calls) = diff_resolving(
+        &holding(1),
+        &holding(2),
+        &DiffOptions::default(),
+        &[(
+            "1",
+            CValue::Number(crate::value::Number::from_f64(f64::NAN)),
+        )],
+    );
+    assert_eq!((report.finding_count(), calls), (1, Vec::<String>::new()));
+}
+
+#[test]
+fn a_token_and_an_object_whose_class_identity_matches_it_are_not_the_same_instance() {
+    let object = crate::test_support::ccustom_id("A", "1", json!({}).as_object().unwrap());
+    let report =
+        crate::diff::diff_with_options(&copaque("1"), &object, &DiffOptions::default()).unwrap();
+    assert_eq!(report.finding_count(), 1);
+}
+
+#[test]
+fn the_resolver_is_called_once_per_token_it_is_needed_for() {
+    let (report, calls) = diff_resolving(
+        &carr(vec![copaque("1"), copaque("2"), copaque("3"), copaque("1")]),
+        &carr(vec![
+            cv(&json!(1)),
+            cv(&json!(2)),
+            copaque("3"),
+            cv(&json!(1)),
+        ]),
+        &DiffOptions::default(),
+        &[("1", cv(&json!(1)))],
+    );
+    assert_eq!(
+        (report.finding_count(), calls),
+        (1, vec!["1".to_string(), "2".to_string()])
+    );
+}
+
+#[test]
+fn a_second_side_cycle_token_resolves_against_an_object_of_its_class_only() {
+    let (report, calls) = diff_resolving(
+        &carr(vec![cv(&json!(1)), cobject_at(2, None)]),
+        &carr(vec![ccycle(), ccycle()]),
+        &DiffOptions::default(),
+        &[("9", cobject_at(1, None))],
+    );
+    let report = report.to_json_value();
+    assert_eq!(
+        (
+            report["type_changes"]["root[0]"]["new_value"].clone(),
+            report["values_changed"]["root[1].x"].clone(),
+            calls,
+        ),
+        (
+            json!({}),
+            json!({"new_value": 1, "old_value": 2}),
+            vec!["9".to_string()],
+        )
+    );
+}
+
+#[test]
+fn a_walk_that_meets_a_failed_object_reports_its_token() {
+    let failed = crate::value::Builder::new().failed_object(
+        vec![(
+            ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+            cv(&json!(1)),
+        )],
+        std::sync::Arc::from("A"),
+        std::sync::Arc::from("A"),
+        26,
+    );
+    let other = cobject_at(1, Some(27));
+    let report = crate::diff::diff_with_options(&failed, &other, &DiffOptions::default())
+        .unwrap()
+        .to_value();
+    let unrendered = crate::value::rendered(&report).unwrap_err();
+    assert_eq!(
+        unrendered
+            .into_iter()
+            .map(|token| token.identity)
+            .collect::<Vec<_>>(),
+        vec!["1a".to_string()]
+    );
+}
+
+#[test]
+fn a_failed_object_equals_only_itself_and_renders_its_entries() {
+    let failed = |instance: usize| {
+        crate::value::Builder::new().failed_object(
+            vec![(
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+                cv(&json!(1)),
+            )],
+            std::sync::Arc::from("A"),
+            std::sync::Arc::from("A"),
+            instance,
+        )
+    };
+    assert_eq!(
+        (
+            failed(1) == failed(1),
+            failed(1) == failed(2),
+            crate::value::rendered(&failed(1)).unwrap().to_serde_json(),
+        ),
+        (true, false, json!({"x": 1}))
+    );
+}
+
+#[test]
+fn a_failed_object_keys_under_ignore_order_apart_from_a_dict_and_another_class() {
+    let memo = IgnoreOrderMemo::new();
+    let failed = |class: &str| {
+        crate::value::Builder::new().failed_object(
+            vec![(
+                ObjectKey::Str(crate::value::Key::Utf8(std::sync::Arc::from("x"))),
+                cv(&json!(1)),
+            )],
+            std::sync::Arc::from(class),
+            std::sync::Arc::from(class),
+            1,
+        )
+    };
+    let key = |value: &CValue| super::hash::item_key(value, &memo);
+    assert_ne!(key(&failed("A")), key(&cv(&json!({"x": 1}))));
+    assert_ne!(key(&failed("A")), key(&failed("B")));
+    assert_eq!(key(&failed("A")), key(&failed("A")));
+}
+
+#[test]
+fn an_object_reports_the_address_it_was_converted_from() {
+    let instance = |value: &CValue| match value {
+        CValue::Object(map) => map.instance(),
+        _ => unreachable!("both values are objects"),
+    };
+    assert_eq!(
+        (
+            instance(&cobject_at(1, Some(7))),
+            instance(&cv(&json!({"x": 1})))
+        ),
+        (Some(7), None)
+    );
+}
+
+// --- default-path hash flooding ---
+
+/// `n` distinct 16-byte UTF-8 keys that drive `FxHasher` to one final state once `prefix` (the
+/// words hashed before the key's bytes) is written: an 8-byte ASCII word, then a second word
+/// solved so the state before the last multiply is zero.
+fn fx_colliding_keys(n: usize, prefix: &[u64]) -> Vec<String> {
+    use std::hash::Hasher;
+    let mut keys = Vec::with_capacity(n);
+    for counter in 0u64.. {
+        if keys.len() == n {
+            break;
+        }
+        let first: u64 = (0..8).fold(0, |word, nibble| {
+            word | ((u64::from(b'a') + ((counter >> (4 * nibble)) & 0xf)) << (8 * nibble))
+        });
+        let mut hasher = FxHasher::default();
+        for &word in prefix {
+            hasher.write_u64(word);
+        }
+        hasher.add_to_hash(first);
+        let second = hasher.hash.rotate_left(5);
+        if let Ok(key) = String::from_utf8([first.to_ne_bytes(), second.to_ne_bytes()].concat()) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// What a `&[u8]` dict key hashes before its bytes: its length.
+const DICT_KEY_PREFIX: [u64; 1] = [16];
+/// What a one-string tuple's `PyHashKey` hashes before the string's bytes: the tuple length, the
+/// `PyHashPart::Scalar` and `ScalarKey::Str` discriminants, the string length.
+const TUPLE_KEY_PREFIX: [u64; 4] = [1, 0, 1, 16];
+
+/// `n` keys `key000…` of `len` bytes, differing only in their trailing digits.
+fn distinct_keys(n: usize, len: usize) -> Vec<String> {
+    let width = len - 3;
+    (0..n).map(|i| format!("key{i:0width$}")).collect()
+}
+
+/// `{k: value}` over every key in `keys`.
+fn str_keyed_dict(keys: &[String], value: i64) -> CValue {
+    CValue::Object(crate::value::Object::from_pairs(
+        keys.iter()
+            .map(|key| {
+                let key = crate::value::Key::Utf8(std::sync::Arc::from(key.as_str()));
+                (ObjectKey::Str(key), cv(&json!(value)))
+            })
+            .collect(),
+    ))
+}
+
+/// A one-member set: a custom object whose `d` attribute maps `(k,)` to `value` for every key.
+fn set_of_tuple_keyed_object(keys: &[String], value: i64) -> CValue {
+    let d = crate::value::Object::from_pairs(
+        keys.iter()
+            .map(|key| {
+                let key = ObjectKey::Other(Box::new(ctuple(vec![cv(&json!(key))])));
+                (key, cv(&json!(value)))
+            })
+            .collect(),
+    );
+    let attribute = crate::value::Key::Utf8(std::sync::Arc::from("d"));
+    let object =
+        crate::value::Object::from_pairs(vec![(ObjectKey::Str(attribute), CValue::Object(d))])
+            .into_class(
+                crate::value::ObjectKind::CustomObject,
+                std::sync::Arc::from("C"),
+                std::sync::Arc::from("C"),
+                crate::value::ObjectLengths {
+                    dict_len: 1,
+                    ..Default::default()
+                },
+                Vec::new(),
+                None,
+            );
+    CValue::Set(SetItems::new(vec![CValue::Object(object)]))
+}
+
+/// The fastest of three default-options diffs of `build(keys, 1)` against `build(keys, 2)`.
+fn fastest_default_diff(
+    build: fn(&[String], i64) -> CValue,
+    keys: &[String],
+) -> std::time::Duration {
+    let (a, b) = (build(keys, 1), build(keys, 2));
+    (0..3)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            crate::diff::diff(&a, &b).expect("two shallow values are far under the depth bound");
+            start.elapsed()
+        })
+        .min()
+        .expect("three runs")
+}
+
+#[test]
+fn fx_colliding_dict_keys_share_one_hash() {
+    use std::hash::BuildHasher;
+    let fx = std::hash::BuildHasherDefault::<FxHasher>::default();
+    let keys = fx_colliding_keys(64, &DICT_KEY_PREFIX);
+    let hashes: std::collections::BTreeSet<u64> =
+        keys.iter().map(|key| fx.hash_one(key.as_bytes())).collect();
+    let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
+    assert_eq!((distinct.len(), hashes.len()), (64, 1));
+}
+
+#[test]
+fn colliding_dict_keys_cost_what_distinct_keys_cost_with_default_options() {
+    let n = 10_000;
+    let colliding = fastest_default_diff(str_keyed_dict, &fx_colliding_keys(n, &DICT_KEY_PREFIX));
+    let distinct = fastest_default_diff(str_keyed_dict, &distinct_keys(n, 15));
+    assert!(
+        colliding < distinct * 4,
+        "colliding {colliding:?} vs distinct {distinct:?}"
+    );
+}
+
+#[test]
+fn colliding_tuple_keys_in_a_set_member_cost_what_distinct_keys_cost_with_default_options() {
+    let n = 10_000;
+    let build = set_of_tuple_keyed_object;
+    let colliding = fastest_default_diff(build, &fx_colliding_keys(n, &TUPLE_KEY_PREFIX));
+    let distinct = fastest_default_diff(build, &distinct_keys(n, 15));
+    assert!(
+        colliding < distinct * 4,
+        "colliding {colliding:?} vs distinct {distinct:?}"
+    );
+}
+
+#[test]
+#[ignore = "measurement: cargo test --release -p deepdiff-core --lib default_path_key_curves -- --ignored --nocapture (about 5 s in release)"]
+fn default_path_key_curves() {
+    for n in [5_000, 10_000, 20_000, 40_000, 80_000] {
+        let seconds = |build, prefix: &[u64]| {
+            [
+                distinct_keys(n, 15),
+                distinct_keys(n, 16),
+                fx_colliding_keys(n, prefix),
+            ]
+            .map(|keys| format!("{:.3}", fastest_default_diff(build, &keys).as_secs_f64()))
+            .join(" / ")
+        };
+        println!(
+            "{n}\tdict {}\ttuple {}",
+            seconds(str_keyed_dict, &DICT_KEY_PREFIX),
+            seconds(set_of_tuple_keyed_object, &TUPLE_KEY_PREFIX)
+        );
+    }
+}

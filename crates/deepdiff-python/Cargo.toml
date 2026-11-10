@@ -11,7 +11,7 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-onix-core = { path = "../../vendor/onix/crates/onix-core" }
+deepdiff-core = { path = "../deepdiff-core" }
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 serde_json = "1"
 num-bigint = "0.5"

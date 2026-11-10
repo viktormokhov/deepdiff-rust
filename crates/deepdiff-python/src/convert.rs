@@ -1,0 +1,1971 @@
+//! Converts a live Python object graph into an [`deepdiff_core::Value`] once, up
+//! front, so [`crate::deepdiff::DeepDiff`] never touches Python objects
+//! again — built *directly*, no intermediate `serde_json::Value` tree, so
+//! the two input trees only ever exist in this memory-frugal form.
+//!
+//! Supported types and the errors raised for the rest: the README's "Known
+//! limitations" section.
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use deepdiff_core::datetime::{
+    Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
+};
+use deepdiff_core::path::{PathSegment, entry_path_segment, render_path};
+use deepdiff_core::value::rendered;
+use deepdiff_core::value::{
+    Builder, Entries, Key as CKey, ObjectKey, ObjectKind, ObjectLengths, SetItems, Str as CStr,
+    Typed,
+};
+use deepdiff_core::{Number as CNumber, Value as CValue};
+use num_bigint::BigInt;
+use pyo3::conversion::IntoPyObjectExt;
+use pyo3::exceptions::{PyAttributeError, PyException, PyTypeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::iter::{
+    BoundDictIterator, BoundFrozenSetIterator, BoundListIterator, BoundSetIterator,
+    BoundTupleIterator,
+};
+use pyo3::types::{
+    IntoPyDict, PyBool, PyBytes, PyComplex, PyDate, PyDateTime, PyDelta, PyDict, PyFloat,
+    PyFrozenSet, PyInt, PyList, PySet, PyString, PyTime, PyTuple, PyType, PyTzInfo,
+};
+
+use crate::errors::MaxDepthError;
+use crate::guard::is_deep;
+
+/// A Python sequence or set being walked (list, tuple, set, frozenset).
+enum SeqIter<'py> {
+    List(BoundListIterator<'py>),
+    Tuple(BoundTupleIterator<'py>),
+    Set(BoundSetIterator<'py>),
+    FrozenSet(BoundFrozenSetIterator<'py>),
+}
+
+impl<'py> SeqIter<'py> {
+    fn next(&mut self) -> Option<Bound<'py, PyAny>> {
+        match self {
+            SeqIter::List(iter) => iter.next(),
+            SeqIter::Tuple(iter) => iter.next(),
+            SeqIter::Set(iter) => iter.next(),
+            SeqIter::FrozenSet(iter) => iter.next(),
+        }
+    }
+
+    /// How many elements are still to come, so a frame can pre-size its buffer.
+    fn len(&self) -> usize {
+        match self {
+            SeqIter::List(iter) => iter.len(),
+            SeqIter::Tuple(iter) => iter.len(),
+            SeqIter::Set(iter) => iter.len(),
+            SeqIter::FrozenSet(iter) => iter.len(),
+        }
+    }
+
+    /// Wraps the finished items in the matching value shape, carrying `class_name`
+    /// (`None` for the exact base type).
+    fn build(&self, items: Vec<CValue>, class_name: Option<Arc<str>>) -> CValue {
+        match self {
+            SeqIter::List(_) => {
+                CValue::Array(Typed::with_class_name(items.into_boxed_slice(), class_name))
+            }
+            SeqIter::Tuple(_) => {
+                CValue::Tuple(Typed::with_class_name(items.into_boxed_slice(), class_name))
+            }
+            SeqIter::Set(_) => CValue::Set(SetItems::new(items).with_type_name(class_name)),
+            SeqIter::FrozenSet(_) => {
+                CValue::FrozenSet(SetItems::new(items).with_type_name(class_name))
+            }
+        }
+    }
+
+    /// Whether the elements are set members, which get a [`child_segment`] placeholder.
+    fn holds_set_members(&self) -> bool {
+        matches!(self, SeqIter::Set(_) | SeqIter::FrozenSet(_))
+    }
+}
+
+/// One in-progress container on [`to_value`]'s work-stack, parked with its
+/// remaining children and everything converted so far until the current
+/// child's result comes back.
+enum Frame<'py> {
+    Seq {
+        remaining: SeqIter<'py>,
+        built: Vec<CValue>,
+        /// Whether the elements are inside a set member, restricting the types
+        /// [`classify`] accepts; transitive through nested containers.
+        restricted: bool,
+        /// The container's own subclass name (`None` for the exact base type).
+        class_name: Option<Arc<str>>,
+    },
+    Dict {
+        remaining: BoundDictIterator<'py>,
+        built: Vec<(ObjectKey, CValue)>,
+        current_key: ObjectKey,
+        /// The `dict` subclass or custom object's class (`None` for a plain `dict`).
+        class: Option<Box<PyClass>>,
+        /// Whether the entries are a `dict`'s items or a custom object's attributes.
+        kind: ObjectKind,
+    },
+}
+
+/// What happens when converting a single object: either it produced a
+/// finished [`CValue`] outright (a scalar, or an empty sequence/dict), or
+/// it's a non-empty container — [`to_value`]'s loop pushes a [`Frame`] and
+/// descends into the returned first child.
+enum Step<'py> {
+    Done(CValue),
+    Seq {
+        iter: SeqIter<'py>,
+        first: Bound<'py, PyAny>,
+        /// See [`Frame::Seq::class_name`].
+        class_name: Option<Arc<str>>,
+    },
+    Dict {
+        iter: BoundDictIterator<'py>,
+        first_key: ObjectKey,
+        first_value: Bound<'py, PyAny>,
+        /// See [`Frame::Dict::class`].
+        class: Option<Box<PyClass>>,
+        /// See [`Frame::Dict::kind`].
+        kind: ObjectKind,
+    },
+}
+
+/// The temporal arm of [`classify`]; `None` when `current` is none of the four
+/// types. `datetime` before `date`: every `datetime` is also a `date`.
+fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<Option<CValue>> {
+    if current.cast_exact::<PyDateTime>().is_ok() {
+        return Ok(Some(datetime_to_value(current, path, None)?));
+    }
+    if current.cast::<PyDateTime>().is_ok() {
+        return Ok(Some(datetime_to_value(
+            current,
+            path,
+            Some(class_name(current)),
+        )?));
+    }
+
+    if current.cast_exact::<PyDate>().is_ok() {
+        return Ok(Some(CValue::Date(Typed::new(date_fields(current, path)?))));
+    }
+    if current.cast::<PyDate>().is_ok() {
+        return Ok(Some(CValue::Date(Typed::with_class_name(
+            date_fields(current, path)?,
+            Some(class_name(current)),
+        ))));
+    }
+
+    if current.cast_exact::<PyTime>().is_ok() {
+        return Ok(Some(time_to_value(current, path, None)?));
+    }
+    if current.cast::<PyTime>().is_ok() {
+        return Ok(Some(time_to_value(
+            current,
+            path,
+            Some(class_name(current)),
+        )?));
+    }
+
+    if current.cast_exact::<PyDelta>().is_ok() {
+        return Ok(Some(timedelta_to_value(current, path, None)?));
+    }
+    if current.cast::<PyDelta>().is_ok() {
+        return Ok(Some(timedelta_to_value(
+            current,
+            path,
+            Some(class_name(current)),
+        )?));
+    }
+
+    Ok(None)
+}
+
+/// Converts one Python object to a finished value or a container step;
+/// `set_member` (transitive) restricts it to the types a set member may be
+/// (see [`unhashable_member_error`]).
+///
+/// A value `DeepDiff` routes to a handler onix lacks is refused at the root
+/// and becomes an opaque token anywhere below it (see [`opaque`]).
+fn classify<'py>(
+    current: &Bound<'py, PyAny>,
+    path: &[PathSegment],
+    builder: &mut Builder,
+    set_member: bool,
+    held: &mut Held,
+) -> PyResult<Step<'py>> {
+    if current.is_none() {
+        return Ok(Step::Done(CValue::Null));
+    }
+
+    // `bool` is a Python `int` subclass: check it first.
+    if let Ok(b) = current.cast::<PyBool>() {
+        return Ok(Step::Done(CValue::Bool(b.is_true())));
+    }
+
+    if let Ok(i) = current.cast::<PyInt>() {
+        return Ok(Step::Done(int_to_value(i, path)?));
+    }
+
+    if let Ok(f) = current.cast::<PyFloat>() {
+        return Ok(Step::Done(float_to_value(f.value())));
+    }
+
+    if let Ok(s) = current.cast::<PyString>() {
+        return Ok(Step::Done(CValue::Str(pystring_to_cstr(s)?)));
+    }
+
+    if let Some(value) = classify_temporal(current, path)? {
+        return Ok(Step::Done(value));
+    }
+
+    if !set_member && let Ok(list) = current.cast_exact::<PyList>() {
+        return Ok(seq_step(SeqIter::List(list.iter()), None));
+    }
+    if !set_member && let Ok(list) = current.cast::<PyList>() {
+        return Ok(seq_step(
+            SeqIter::List(list.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if let Ok(tuple) = current.cast_exact::<PyTuple>() {
+        return Ok(seq_step(SeqIter::Tuple(tuple.iter()), None));
+    }
+    // A `tuple` subclass (a `namedtuple` included) carries its class name.
+    if !set_member && let Ok(tuple) = current.cast::<PyTuple>() {
+        return Ok(seq_step(
+            SeqIter::Tuple(tuple.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if let Ok(set) = current.cast_exact::<PySet>() {
+        return Ok(seq_step(SeqIter::Set(set.iter()), None));
+    }
+    // A `set` subclass, refused as a set member like `tuple` above.
+    if !set_member && let Ok(set) = current.cast::<PySet>() {
+        return Ok(seq_step(
+            SeqIter::Set(set.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if let Ok(frozen) = current.cast_exact::<PyFrozenSet>() {
+        return Ok(seq_step(SeqIter::FrozenSet(frozen.iter()), None));
+    }
+    if !set_member && let Ok(frozen) = current.cast::<PyFrozenSet>() {
+        return Ok(seq_step(
+            SeqIter::FrozenSet(frozen.iter()),
+            Some(class_name(current)),
+        ));
+    }
+
+    if !set_member && let Ok(dict) = current.cast::<PyDict>() {
+        // A `dict` subclass carries its class name and identity; a plain `dict` none.
+        let class = current
+            .cast_exact::<PyDict>()
+            .is_err()
+            .then(|| Box::new(py_class(current, ObjectLengths::default(), held)));
+        // Iterate a snapshot: converting a value runs user code (a `@property`
+        // getter, `__getattr__`) that can insert into this dict, which would
+        // panic pyo3's live-dict iterator.
+        let mut iter = dict.copy()?.iter();
+
+        return Ok(match next_dict_entry(&mut iter, path, builder)? {
+            None => Step::Done(finish_object(builder, Vec::new(), class, ObjectKind::Dict)),
+            Some((first_key, first_value)) => Step::Dict {
+                iter,
+                first_key,
+                first_value,
+                class,
+                kind: ObjectKind::Dict,
+            },
+        });
+    }
+
+    if set_member {
+        return Err(unhashable_member_error(current, path));
+    }
+    classify_other(current, path, builder, held)
+}
+
+/// [`classify`] for a value onix does not convert natively: a class
+/// attribute, a custom object, or an opaque token for a value `DeepDiff` would
+/// never reach, refused at the root.
+fn classify_other<'py>(
+    current: &Bound<'py, PyAny>,
+    path: &[PathSegment],
+    builder: &mut Builder,
+    held: &mut Held,
+) -> PyResult<Step<'py>> {
+    if let Ok(attribute) = current.cast::<ClassAttribute>() {
+        let value = attribute.get().0.bind(current.py()).clone();
+        held.resolvable
+            .insert(identity_of(&value), value.clone().unbind());
+        return Ok(Step::Done(opaque(&value, builder, held)));
+    }
+    if held.on_path.contains(&(current.as_ptr() as usize)) {
+        let identity = identity_of(current);
+        held.resolvable
+            .insert(identity.clone(), current.clone().unbind());
+        held.cycle_targets.insert(identity.clone());
+        return Ok(Step::Done(
+            builder.cycle(class_name(current), Arc::from(identity)),
+        ));
+    }
+    if let Some(strategy) = object_strategy(current)? {
+        return object_step(current, &strategy, path, builder, held);
+    }
+    if path.is_empty() {
+        return Err(unsupported_type_error(
+            &type_name(current),
+            &render_path(path).to_string(),
+        ));
+    }
+    Ok(Step::Done(opaque(current, builder, held)))
+}
+
+/// A class attribute's value, as [`detailed_dict`] hands it to [`classify`]:
+/// held as an opaque token until a report compares it, then converted by
+/// [`resolve_token`].
+#[pyclass(frozen)]
+struct ClassAttribute(Py<PyAny>);
+
+/// The value the class-attribute or cycle token `identity` stands for, its
+/// object converted by its own walk once per diff; `None` for any other token
+/// or when the conversion fails, which [`token_error`] then reports. A value
+/// too deep for the calling thread while `inline` is kept for a rerun on the
+/// sized worker.
+pub(crate) fn resolve_token(
+    py: Python<'_>,
+    identity: &str,
+    held: &mut Held,
+    inline: bool,
+) -> Option<Arc<CValue>> {
+    if let Some(resolved) = held.resolved.get(identity) {
+        return resolved.clone().filter(|value| !(inline && is_deep(value)));
+    }
+    let object = held.resolvable.get(identity)?.clone_ref(py);
+    let resolved = match to_value(object.bind(py), held.max_depth, held) {
+        Ok((converted, saw_wtf8)) => {
+            held.saw_wtf8 |= saw_wtf8;
+            Some(Arc::new(converted))
+        }
+        Err(err) => {
+            held.resolution_errors.insert(identity.to_string(), err);
+            None
+        }
+    };
+    held.resolved.insert(identity.to_string(), resolved.clone());
+    if inline && resolved.as_deref().is_some_and(is_deep) {
+        held.needs_worker = true;
+        return None;
+    }
+    resolved
+}
+
+/// The error a report raises for the token `identity` it cannot show at
+/// `path`: the error converting its object, a `MaxDepthError` for a class
+/// attribute nested past `max_depth` on its own, or the refusal.
+pub(crate) fn token_error(
+    py: Python<'_>,
+    identity: &str,
+    type_name: &str,
+    path: &str,
+    held: &Held,
+) -> PyErr {
+    if let Some(err) = held.failures.get(identity) {
+        return err.clone_ref(py);
+    }
+    match held.resolution_errors.get(identity) {
+        Some(err) if err.is_instance_of::<MaxDepthError>(py) => MaxDepthError::new_err(format!(
+            "the {type_name} class attribute at {path} is nested past the configured max_depth \
+             ({})",
+            held.max_depth,
+        )),
+        Some(err) if !err.is_instance_of::<PyException>(py) => err.clone_ref(py),
+        _ => opaque_error(type_name, path),
+    }
+}
+
+/// The identity string an opaque token for `obj` carries: its address.
+fn identity_of(obj: &Bound<'_, PyAny>) -> String {
+    format!("{:x}", obj.as_ptr() as usize)
+}
+
+/// Per-diff conversion state; keeps every addressed object alive for the run.
+pub(crate) struct Held {
+    /// Objects whose addresses identities are keyed on, held so no address is reused.
+    objects: Vec<Py<PyAny>>,
+    /// The objects class-attribute and cycle tokens stand for, by identity.
+    resolvable: HashMap<String, Py<PyAny>>,
+    pub(crate) cycle_targets: HashSet<String>,
+    resolved: HashMap<String, Option<Arc<CValue>>>,
+    resolution_errors: HashMap<String, PyErr>,
+    failures: HashMap<String, PyErr>,
+    /// The custom objects on the current walk's path.
+    on_path: Vec<usize>,
+    /// Each `Enum` class's length, by class address.
+    enum_lengths: HashMap<usize, usize>,
+    max_depth: usize,
+    pub(crate) saw_wtf8: bool,
+    pub(crate) needs_render: bool,
+    pub(crate) needs_worker: bool,
+}
+
+impl Held {
+    /// An error converting a token's object that is not an `Exception`
+    /// (`KeyboardInterrupt`, `SystemExit`), which the diff could not raise.
+    pub(crate) fn interrupt(&self, py: Python<'_>) -> Option<PyErr> {
+        self.resolution_errors
+            .values()
+            .find(|err| !err.is_instance_of::<PyException>(py))
+            .map(|err| err.clone_ref(py))
+    }
+
+    pub(crate) fn new(max_depth: usize) -> Self {
+        Self {
+            objects: Vec::new(),
+            resolvable: HashMap::new(),
+            cycle_targets: HashSet::new(),
+            resolved: HashMap::new(),
+            resolution_errors: HashMap::new(),
+            failures: HashMap::new(),
+            on_path: Vec::new(),
+            enum_lengths: HashMap::new(),
+            max_depth,
+            saw_wtf8: false,
+            needs_render: false,
+            needs_worker: false,
+        }
+    }
+}
+
+/// An [`ObjectKind::Opaque`] token for `obj`: equal only to a token for the
+/// same object, and refused by [`render_report`] wherever a report shows it.
+fn opaque(obj: &Bound<'_, PyAny>, builder: &mut Builder, held: &mut Held) -> CValue {
+    held.objects.push(obj.clone().unbind());
+    held.needs_render = true;
+    builder.opaque(class_name(obj), Arc::from(identity_of(obj)))
+}
+
+/// How `_diff_obj` or `_diff_enum` enumerates an accepted object's attributes.
+enum Strategy<'py> {
+    Enum,
+    Dict(Bound<'py, PyList>),
+    Slots,
+    Members(Bound<'py, PyDict>),
+}
+
+/// The attribute strategy for `obj`, or `None` for a type `DeepDiff` routes to
+/// a handler onix lacks; predicates and order follow `diff.py::_diff`'s ladder.
+/// See `tests/golden/README.md`'s "Refused mappings".
+fn object_strategy<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Strategy<'py>>> {
+    let py = obj.py();
+
+    if obj.is_instance_of::<PyType>()
+        || obj.is_instance(&py.import("types")?.getattr("ModuleType")?)?
+    {
+        return Ok(None);
+    }
+    if obj.is_instance_of::<PyComplex>()
+        || obj.is_instance(&py.import("decimal")?.getattr("Decimal")?)?
+        || obj.is_instance(&py.import("fractions")?.getattr("Fraction")?)?
+        || obj.is_instance(&py.import("uuid")?.getattr("UUID")?)?
+        || is_ipaddress(obj)?
+        || is_loaded_instance(obj, "numpy", "generic")?
+        || is_loaded_instance(obj, "pydantic.main", "BaseModel")?
+    {
+        return Ok(None);
+    }
+    if obj.is_instance(&py.import("collections.abc")?.getattr("Iterable")?)? {
+        return Ok(None);
+    }
+    if obj.is_instance(&py.import("enum")?.getattr("Enum")?)? {
+        return Ok(Some(Strategy::Enum));
+    }
+    let dir = obj.dir()?;
+    if dir.contains("__dict__")? {
+        return Ok(Some(Strategy::Dict(dir)));
+    }
+    if dir.contains("__slots__")? {
+        return Ok(Some(Strategy::Slots));
+    }
+    let members = getmembers_noncallable(obj, &dir)?;
+    let has_public = members.keys().iter().any(|key| {
+        key.extract::<String>()
+            .is_ok_and(|name| !name.starts_with("__"))
+    });
+    Ok(has_public.then_some(Strategy::Members(members)))
+}
+
+/// Whether `obj` is an instance of `module.class`, without importing
+/// `module`: an instance of one implies the module is already loaded.
+fn is_loaded_instance(obj: &Bound<'_, PyAny>, module: &str, class: &str) -> PyResult<bool> {
+    let modules = obj.py().import("sys")?.getattr("modules")?;
+    match modules.cast::<PyDict>()?.get_item(module)? {
+        Some(module) => obj.is_instance(&module.getattr(class)?),
+        None => Ok(false),
+    }
+}
+
+/// Whether `obj` is an `ipaddress` address, network, or interface — the types
+/// `DeepDiff` routes to its `ipranges` handler. Checked against the six public
+/// `ipaddress` classes rather than a private base, so it stays correct if the
+/// module's internals change.
+fn is_ipaddress(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let module = obj.py().import("ipaddress")?;
+    for class in [
+        "IPv4Address",
+        "IPv6Address",
+        "IPv4Network",
+        "IPv6Network",
+        "IPv4Interface",
+        "IPv6Interface",
+    ] {
+        if obj.is_instance(&module.getattr(class)?)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Starts one custom object: its attributes (see [`object_attributes`]) are
+/// walked like a `dict`'s items under its class.
+fn object_step<'py>(
+    obj: &Bound<'py, PyAny>,
+    strategy: &Strategy<'py>,
+    path: &[PathSegment],
+    builder: &mut Builder,
+    held: &mut Held,
+) -> PyResult<Step<'py>> {
+    let (attrs, lengths, class_attributes) = match object_attributes(obj, strategy, path, held) {
+        Ok(read) => read,
+        Err(err) if err.is_instance_of::<PyException>(obj.py()) => {
+            return failed_object_step(obj, err, path, builder, held);
+        }
+        Err(err) => return Err(err),
+    };
+    held.needs_render |= !class_attributes.is_empty();
+    let mut class = Box::new(py_class(obj, lengths, held));
+    class.class_attributes = class_attributes;
+    class.instance = Some(obj.as_ptr() as usize);
+    held.objects.push(obj.clone().unbind());
+    let mut iter = attrs.iter();
+    Ok(match next_dict_entry(&mut iter, path, builder)? {
+        None => Step::Done(finish_object(
+            builder,
+            Vec::new(),
+            Some(class),
+            ObjectKind::CustomObject,
+        )),
+        Some((first_key, first_value)) => Step::Dict {
+            iter,
+            first_key,
+            first_value,
+            class: Some(class),
+            kind: ObjectKind::CustomObject,
+        },
+    })
+}
+
+/// Starts an object whose attributes could not be read with `err`: an
+/// [`ObjectKind::Failed`] object over its instance `__dict__`, which a report
+/// comparing or showing it raises `err` for.
+fn failed_object_step<'py>(
+    obj: &Bound<'py, PyAny>,
+    err: PyErr,
+    path: &[PathSegment],
+    builder: &mut Builder,
+    held: &mut Held,
+) -> PyResult<Step<'py>> {
+    let py = obj.py();
+    let identity = identity_of(obj);
+    held.failures.entry(identity).or_insert(err);
+    held.needs_render = true;
+    held.objects.push(obj.clone().unbind());
+    let storage = PyDict::new(py);
+    let instance_dict = match obj.getattr("__dict__") {
+        Ok(dict) => dict.cast_into::<PyDict>().ok(),
+        Err(err) if err.is_instance_of::<PyException>(py) => None,
+        Err(err) => return Err(err),
+    };
+    if let Some(instance_dict) = instance_dict {
+        for (key, value) in instance_dict.copy()?.iter() {
+            if !key
+                .extract::<String>()
+                .is_ok_and(|name| name.starts_with("__"))
+            {
+                storage.set_item(key, value)?;
+            }
+        }
+    }
+    let mut class = Box::new(py_class(obj, ObjectLengths::default(), held));
+    class.instance = Some(obj.as_ptr() as usize);
+    let mut iter = storage.iter();
+    Ok(match next_dict_entry(&mut iter, path, builder)? {
+        None => Step::Done(finish_object(
+            builder,
+            Vec::new(),
+            Some(class),
+            ObjectKind::Failed,
+        )),
+        Some((first_key, first_value)) => Step::Dict {
+            iter,
+            first_key,
+            first_value,
+            class: Some(class),
+            kind: ObjectKind::Failed,
+        },
+    })
+}
+
+/// The attributes `DeepDiff` 9.1.0 diffs for an accepted object, plus the lengths
+/// `Object::into_class` takes; names starting `__` are dropped.
+fn object_attributes<'py>(
+    obj: &Bound<'py, PyAny>,
+    strategy: &Strategy<'py>,
+    path: &[PathSegment],
+    held: &mut Held,
+) -> PyResult<(Bound<'py, PyDict>, ObjectLengths, Vec<Arc<str>>)> {
+    let mut class_attributes = Vec::new();
+    let (result, lengths) = match strategy {
+        Strategy::Enum => enum_dict(obj, held)?,
+        Strategy::Dict(dir) => detailed_dict(obj, dir, path, &mut class_attributes)?,
+        Strategy::Slots => (slots_dict(obj)?, plain_lengths(dunder_dict_len(obj)?, 0)),
+        Strategy::Members(members) => (members.clone(), plain_lengths(dunder_dict_len(obj)?, 0)),
+    };
+
+    let dunder: Vec<Bound<'py, PyAny>> = result
+        .keys()
+        .iter()
+        .filter(|key| {
+            key.extract::<String>()
+                .is_ok_and(|name| name.starts_with("__"))
+        })
+        .collect();
+    for key in dunder {
+        result.del_item(&key)?;
+    }
+    Ok((result, lengths, class_attributes))
+}
+
+/// The [`ObjectLengths`] of an object whose class is not iterable.
+fn plain_lengths(dict_len: usize, hidden_count: usize) -> ObjectLengths {
+    ObjectLengths {
+        dict_len,
+        hidden_count,
+        type_len: 1,
+    }
+}
+
+/// `len(obj.__dict__)`, or `0` when `obj` has none.
+fn dunder_dict_len(obj: &Bound<'_, PyAny>) -> PyResult<usize> {
+    match obj.getattr("__dict__") {
+        Ok(dict) => dict.len(),
+        Err(err) if err.is_instance_of::<PyAttributeError>(obj.py()) => Ok(0),
+        Err(err) => Err(err),
+    }
+}
+
+/// `detailed__dict__(obj, include_keys=ENUM_INCLUDE_KEYS)`: `name` and
+/// `value`, each skipped when reading it raises an `Exception`. The hidden
+/// count takes each other `__dict__` value as one `DeepHash` node; the class
+/// length is computed once per `Enum` class for the diff.
+fn enum_dict<'py>(
+    obj: &Bound<'py, PyAny>,
+    held: &mut Held,
+) -> PyResult<(Bound<'py, PyDict>, ObjectLengths)> {
+    let py = obj.py();
+    let result = PyDict::new(py);
+    for name in ["name", "value"] {
+        match obj.getattr(name) {
+            Ok(value) if !value.is_callable() => result.set_item(name, value)?,
+            Ok(_) => {}
+            Err(err) if err.is_instance_of::<PyException>(py) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    let keys: Vec<String> = match obj.getattr("__dict__") {
+        Ok(dict) => dict
+            .try_iter()?
+            .map(|key| key?.extract())
+            .collect::<PyResult<_>>()?,
+        Err(err) if err.is_instance_of::<PyAttributeError>(py) => Vec::new(),
+        Err(err) => return Err(err),
+    };
+    let hidden_count = keys
+        .iter()
+        .filter(|key| *key != "_name_" && *key != "_value_")
+        .map(|key| if key.starts_with("__") { 1 } else { 2 })
+        .sum();
+    let class = obj.get_type();
+    let type_len = if let Some(type_len) = held.enum_lengths.get(&(class.as_ptr() as usize)) {
+        *type_len
+    } else {
+        let mut type_len = 0;
+        for member in class.try_iter()? {
+            type_len += dunder_dict_len(&member?)?;
+        }
+        held.enum_lengths.insert(class.as_ptr() as usize, type_len);
+        held.objects.push(class.into_any().unbind());
+        type_len
+    };
+    Ok((
+        result,
+        ObjectLengths {
+            dict_len: keys.len(),
+            hidden_count,
+            type_len,
+        },
+    ))
+}
+
+/// `helper.detailed__dict__(obj)`, and `len(obj.__dict__)`. An
+/// `AttributeError` from any read is refused, where `DeepDiff` reports the
+/// object `unprocessed`.
+fn detailed_dict<'py>(
+    obj: &Bound<'py, PyAny>,
+    dir: &Bound<'py, PyList>,
+    path: &[PathSegment],
+    class_attributes: &mut Vec<Arc<str>>,
+) -> PyResult<(Bound<'py, PyDict>, ObjectLengths)> {
+    let py = obj.py();
+    let result = PyDict::new(py);
+    let private_prefix = format!("_{}__", type_name(obj));
+    let unprocessed = |err: PyErr| {
+        if err.is_instance_of::<PyAttributeError>(py) {
+            unprocessed_error(obj, path, &err)
+        } else {
+            err
+        }
+    };
+
+    // The user's `copy()` may hand back the live dict, so iterate a C-level
+    // copy of whatever it returns.
+    let instance_dict = obj
+        .getattr("__dict__")
+        .and_then(|dict| dict.call_method0("copy"))
+        .map_err(unprocessed)?;
+    let Ok(instance_dict) = instance_dict.cast_into::<PyDict>() else {
+        return Err(unsupported_type_error(
+            &type_name(obj),
+            &render_path(path).to_string(),
+        ));
+    };
+    let instance_dict = instance_dict.copy()?;
+    let mut dunder_keys = 0;
+    for (key, value) in instance_dict.iter() {
+        if let Ok(name) = key.extract::<String>()
+            && name.starts_with("__")
+        {
+            dunder_keys += 1;
+            continue;
+        }
+        result.set_item(key, value)?;
+    }
+
+    let class = obj.get_type();
+    for name in dir.iter() {
+        let Ok(text) = name.extract::<String>() else {
+            continue;
+        };
+        if text.starts_with("__") || text.starts_with(&private_prefix) || result.contains(&name)? {
+            continue;
+        }
+        let value = obj.getattr(&*text).map_err(unprocessed)?;
+        if value.is_callable() {
+            continue;
+        }
+        let is_class_attribute = match class.getattr(&*text) {
+            Ok(class_value) => class_value.is(&value),
+            Err(err) if err.is_instance_of::<PyAttributeError>(py) => false,
+            Err(err) => return Err(err),
+        };
+        if is_class_attribute {
+            class_attributes.push(Arc::from(text));
+            result.set_item(name, ClassAttribute(value.unbind()))?;
+        } else {
+            result.set_item(name, value)?;
+        }
+    }
+
+    Ok((result, plain_lengths(instance_dict.len(), dunder_keys)))
+}
+
+/// `_diff_obj._dict_from_slots(obj)` (diff.py): the set slots up the MRO,
+/// each un-mangled to read it and keyed by its own name.
+fn slots_dict<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    let py = obj.py();
+    let result = PyDict::new(py);
+    let type_name = type_name(obj);
+    let mro = obj.get_type().getattr("__mro__")?;
+
+    for base in mro.try_iter()? {
+        let slots = match base?.getattr("__slots__") {
+            Ok(slots) => slots,
+            Err(err) if err.is_instance_of::<PyAttributeError>(py) => continue,
+            Err(err) => return Err(err),
+        };
+        let names: Vec<String> = if let Ok(single) = slots.extract::<String>() {
+            vec![single]
+        } else {
+            slots
+                .try_iter()?
+                .map(|item| item?.extract::<String>())
+                .collect::<PyResult<_>>()?
+        };
+        for name in names {
+            let attr = if name.starts_with("__") && name != "__weakref__" {
+                format!("_{type_name}{name}")
+            } else {
+                name.clone()
+            };
+            if obj.hasattr(&*attr)? {
+                result.set_item(&name, obj.getattr(&*attr)?)?;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// `{k: v for k, v in inspect.getmembers(obj) if not callable(v)}`, which
+/// skips a name whose read raises `AttributeError`.
+fn getmembers_noncallable<'py>(
+    obj: &Bound<'py, PyAny>,
+    dir: &Bound<'py, PyList>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let py = obj.py();
+    let result = PyDict::new(py);
+    for name in dir.iter() {
+        let Ok(text) = name.extract::<String>() else {
+            continue;
+        };
+        let value = match obj.getattr(&*text) {
+            Ok(value) => value,
+            Err(err) if err.is_instance_of::<PyAttributeError>(py) => continue,
+            Err(err) => return Err(err),
+        };
+        if !value.is_callable() {
+            result.set_item(name, value)?;
+        }
+    }
+    Ok(result)
+}
+
+/// Starts one sequence: an empty one is finished outright, a non-empty one
+/// hands its first element back with the rest parked in the returned iterator.
+/// `class_name` is the subclass name (`None` for the exact base type); see
+/// `docs/design/value-model.md`'s "Subclasses" section.
+fn seq_step(mut iter: SeqIter<'_>, class_name: Option<Arc<str>>) -> Step<'_> {
+    match iter.next() {
+        None => Step::Done(iter.build(Vec::new(), class_name)),
+        Some(first) => Step::Seq {
+            iter,
+            first,
+            class_name,
+        },
+    }
+}
+
+/// What [`advance_frame`] returns: either the frame needs its next child
+/// converted before it can finish, or it's fully built.
+enum Advance<'py> {
+    NeedsChild {
+        pending: Pending<'py>,
+        frame: Frame<'py>,
+    },
+    Done(CValue),
+}
+
+/// The next object [`to_value`]'s loop must convert: the object itself, the
+/// depth it sits at, and whether it is a set member (which restricts the
+/// types [`classify`] accepts for it).
+type Pending<'py> = (Bound<'py, PyAny>, usize, bool);
+
+/// Attaches a just-finished child `value` into `frame` and figures out what
+/// happens next: either `frame` has another child to convert
+/// (`Advance::NeedsChild`, with `path` extended for it), or `frame` is fully
+/// built (`Advance::Done`). `path` must already have had the finished child's
+/// own segment popped by the caller — see [`to_value`]. A finished custom
+/// object leaves `on_path`.
+///
+fn advance_frame<'py>(
+    frame: Frame<'py>,
+    value: CValue,
+    path: &mut Vec<PathSegment>,
+    builder: &mut Builder,
+    on_path: &mut Vec<usize>,
+) -> Result<Advance<'py>, (PyErr, Option<ObjectRef>)> {
+    match frame {
+        Frame::Seq {
+            mut remaining,
+            mut built,
+            restricted,
+            class_name,
+        } => {
+            built.push(value);
+
+            Ok(match remaining.next() {
+                Some(next_item) => {
+                    path.push(child_segment(remaining.holds_set_members(), built.len()));
+                    Advance::NeedsChild {
+                        pending: (next_item, path.len(), restricted),
+                        frame: Frame::Seq {
+                            remaining,
+                            built,
+                            restricted,
+                            class_name,
+                        },
+                    }
+                }
+                None => Advance::Done(remaining.build(built, class_name)),
+            })
+        }
+        Frame::Dict {
+            mut remaining,
+            mut built,
+            current_key,
+            class,
+            kind,
+        } => {
+            built.push((current_key, value));
+
+            let next = next_dict_entry(&mut remaining, path, builder).map_err(|err| {
+                let object = class.as_ref().and_then(|class| {
+                    class
+                        .instance
+                        .map(|instance| (class.name.clone(), instance))
+                });
+                (err, object)
+            })?;
+            if next.is_none() && class.as_ref().is_some_and(|class| class.instance.is_some()) {
+                on_path.pop();
+            }
+            match next {
+                Some((key, next_value)) => {
+                    path.push(entry_path_segment(kind, &key));
+                    Ok(Advance::NeedsChild {
+                        pending: (next_value, path.len(), false),
+                        frame: Frame::Dict {
+                            remaining,
+                            built,
+                            current_key: key,
+                            class,
+                            kind,
+                        },
+                    })
+                }
+                None => Ok(Advance::Done(finish_object(builder, built, class, kind))),
+            }
+        }
+    }
+}
+
+/// Builds the finished [`CValue`] for a `Frame::Dict`, as the kind selects: a
+/// `dict` (carrying its optional subclass class) or a custom object (carrying
+/// its class). See [`PyClass`] for the name/identity split.
+fn finish_object(
+    builder: &mut Builder,
+    built: Vec<(ObjectKey, CValue)>,
+    class: Option<Box<PyClass>>,
+    kind: ObjectKind,
+) -> CValue {
+    match kind {
+        ObjectKind::Dict => {
+            builder.object_with_keys_and_class(built, class.map(|c| (c.name, c.identity)))
+        }
+        ObjectKind::Failed => {
+            let class = class.expect("a failed object always carries its class");
+            builder.failed_object(
+                built,
+                class.name,
+                class.identity,
+                class
+                    .instance
+                    .expect("a failed object always carries its address"),
+            )
+        }
+        ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle => {
+            let class = class.expect("a custom object always carries its class");
+            builder.custom_object(
+                built,
+                class.name,
+                class.identity,
+                class.lengths,
+                class.class_attributes,
+                class.instance,
+            )
+        }
+    }
+}
+
+/// The name and address of a custom object being converted.
+type ObjectRef = (Arc<str>, usize);
+
+/// The name and address of the custom object a frame converts, `None` for any
+/// other frame.
+fn frame_object(frame: &Frame<'_>) -> Option<ObjectRef> {
+    match frame {
+        Frame::Dict {
+            class: Some(class), ..
+        } => class
+            .instance
+            .map(|instance| (class.name.clone(), instance)),
+        _ => None,
+    }
+}
+
+/// After [`advance_frame`] fails with `err` in a frame converting `object`
+/// (`None` for a container), the token for that object, or the innermost one
+/// still being converted (see [`object_failure_at`]).
+fn advance_failure(
+    py: Python<'_>,
+    (err, object): (PyErr, Option<ObjectRef>),
+    stack: &mut Vec<Frame<'_>>,
+    path: &mut Vec<PathSegment>,
+    held: &mut Held,
+    builder: &mut Builder,
+) -> PyResult<CValue> {
+    match object {
+        Some(object) if err.is_instance_of::<PyException>(py) => {
+            held.on_path.pop();
+            Ok(object_failure(err, object, held, builder))
+        }
+        _ => object_failure_at(py, err, stack, path, held, builder),
+    }
+}
+
+/// After `err`, unwinds the walk to the innermost custom object still being
+/// converted, dropping the frames above it and its own, and returns
+/// [`object_failure`]'s token for it; `Err(err)` when `err` is not an
+/// `Exception` or no custom object is being converted.
+fn object_failure_at(
+    py: Python<'_>,
+    err: PyErr,
+    stack: &mut Vec<Frame<'_>>,
+    path: &mut Vec<PathSegment>,
+    held: &mut Held,
+    builder: &mut Builder,
+) -> PyResult<CValue> {
+    if !err.is_instance_of::<PyException>(py) {
+        return Err(err);
+    }
+    let Some(index) = stack
+        .iter()
+        .rposition(|frame| frame_object(frame).is_some())
+    else {
+        return Err(err);
+    };
+    let object = frame_object(&stack[index]).expect("the frame at `index` converts an object");
+    for frame in stack.drain(index..) {
+        if frame_object(&frame).is_some() {
+            held.on_path.pop();
+        }
+    }
+    path.truncate(index);
+    Ok(object_failure(err, object, held, builder))
+}
+
+/// An opaque token for the custom object `(name, address)` whose conversion
+/// failed with `err`, which a report showing the token raises.
+fn object_failure(
+    err: PyErr,
+    (name, address): ObjectRef,
+    held: &mut Held,
+    builder: &mut Builder,
+) -> CValue {
+    let identity = format!("{address:x}");
+    held.needs_render = true;
+    let token = builder.opaque(name, Arc::from(identity.as_str()));
+    held.failures.entry(identity).or_insert(err);
+    token
+}
+
+/// Converts a Python object into a [`deepdiff_core::Value`] with an explicit stack;
+/// raises [`MaxDepthError`] past `max_depth` (root at 0; see
+/// `docs/design/depth-budget.md`'s "Equal inputs of any depth").
+///
+/// Never recurses natively, and every `deepdiff_core` step run while building (set
+/// ordering, `Value`'s `Drop`) is iterative, so native stack and error-path
+/// teardown stay O(1) at any depth; only the diff engine needs
+/// `crate::guard`'s sized worker.
+///
+/// The second return value is whether the walk built a lone-surrogate `str` or
+/// key (see [`pystring_to_cstr`]). `held` collects the objects the value's
+/// identities name, and must outlive the diff.
+///
+/// # Errors
+///
+/// `TypeError` (unsupported type), `ValueError` (unreadable or out-of-range
+/// value), [`MaxDepthError`] past `max_depth`.
+pub(crate) fn to_value(
+    obj: &Bound<'_, PyAny>,
+    max_depth: usize,
+    held: &mut Held,
+) -> PyResult<(CValue, bool)> {
+    let py = obj.py();
+    let mut builder = Builder::new();
+    held.on_path.clear();
+    let mut stack: Vec<Frame<'_>> = Vec::new();
+    let mut path: Vec<PathSegment> = Vec::new();
+    let mut pending: Option<Pending<'_>> = Some((obj.clone(), 0, false));
+    let mut finished: Option<CValue> = None;
+    let mut saw_wtf8 = false;
+
+    loop {
+        if let Some((current, depth, set_member)) = pending.take() {
+            let step = if depth > max_depth {
+                Err(max_depth_error(max_depth, &path))
+            } else {
+                classify(&current, &path, &mut builder, set_member, held)
+            }
+            .or_else(|err| {
+                object_failure_at(py, err, &mut stack, &mut path, held, &mut builder)
+                    .map(Step::Done)
+            })?;
+
+            match step {
+                Step::Done(value) => {
+                    if matches!(&value, CValue::Str(CStr::Wtf8(_))) {
+                        saw_wtf8 = true;
+                    }
+                    finished = Some(value);
+                }
+                Step::Seq {
+                    iter,
+                    first,
+                    class_name,
+                } => {
+                    let child_depth = depth + 1;
+                    let restricted = set_member || iter.holds_set_members();
+                    path.push(child_segment(iter.holds_set_members(), 0));
+                    // `iter` has already yielded `first`.
+                    let capacity = iter.len().saturating_add(1);
+                    stack.push(Frame::Seq {
+                        remaining: iter,
+                        built: Vec::with_capacity(capacity),
+                        restricted,
+                        class_name,
+                    });
+                    pending = Some((first, child_depth, restricted));
+                    continue;
+                }
+                Step::Dict {
+                    iter,
+                    first_key,
+                    first_value,
+                    class,
+                    kind,
+                } => {
+                    let child_depth = depth + 1;
+                    if matches!(first_key, ObjectKey::Str(CKey::Wtf8(_))) {
+                        saw_wtf8 = true;
+                    }
+                    path.push(entry_path_segment(kind, &first_key));
+                    let capacity = iter.len().saturating_add(1);
+                    held.on_path
+                        .extend(class.as_ref().and_then(|class| class.instance));
+                    stack.push(Frame::Dict {
+                        remaining: iter,
+                        built: Vec::with_capacity(capacity),
+                        current_key: first_key,
+                        class,
+                        kind,
+                    });
+                    pending = Some((first_value, child_depth, false));
+                    continue;
+                }
+            }
+        }
+
+        let value = finished.take().expect(
+            "loop invariant: every iteration either sets `pending` (and `continue`s) or `finished`",
+        );
+
+        match stack.pop() {
+            None => return Ok((value, saw_wtf8)),
+            Some(frame) => {
+                path.pop();
+                match advance_frame(frame, value, &mut path, &mut builder, &mut held.on_path)
+                    .or_else(|failure| {
+                        advance_failure(py, failure, &mut stack, &mut path, held, &mut builder)
+                            .map(Advance::Done)
+                    })? {
+                    Advance::NeedsChild {
+                        pending: next_pending,
+                        frame,
+                    } => {
+                        if let Frame::Dict { current_key, .. } = &frame
+                            && matches!(current_key, ObjectKey::Str(CKey::Wtf8(_)))
+                        {
+                            saw_wtf8 = true;
+                        }
+                        stack.push(frame);
+                        pending = Some(next_pending);
+                    }
+                    Advance::Done(v) => finished = Some(v),
+                }
+            }
+        }
+    }
+}
+
+/// The path segment for one sequence element. A set member has no subscript,
+/// so it reports as the `<set member>` placeholder.
+fn child_segment(set_member: bool, index: usize) -> PathSegment {
+    if set_member {
+        PathSegment::SetItem("<set member>".to_string())
+    } else {
+        PathSegment::Index(index)
+    }
+}
+
+/// Pulls the next `(key, value)` pair out of a dict iterator, classifying its
+/// key. `dict_path` is the dict's own path, which a bad key's error reports.
+fn next_dict_entry<'py>(
+    iter: &mut BoundDictIterator<'py>,
+    dict_path: &[PathSegment],
+    builder: &mut Builder,
+) -> PyResult<Option<(ObjectKey, Bound<'py, PyAny>)>> {
+    let Some((key, value)) = iter.next() else {
+        return Ok(None);
+    };
+
+    let key = classify_dict_key(&key, dict_path, builder)?;
+
+    Ok(Some((key, value)))
+}
+
+/// Classifies one dict key: a `str` (a UTF-8 one interned), or a scalar per
+/// [`classify_key_scalar`], or a flat `tuple` of scalars; a subclass key
+/// classifies as its base type with no class name. Divergences:
+/// `tests/golden/README.md`, "Subclass dict keys".
+fn classify_dict_key(
+    key: &Bound<'_, PyAny>,
+    dict_path: &[PathSegment],
+    builder: &mut Builder,
+) -> PyResult<ObjectKey> {
+    if let Ok(s) = key.cast::<PyString>() {
+        let s = pystring_to_cstr(s)?;
+        return Ok(ObjectKey::Str(builder.intern_key(s)));
+    }
+
+    if let Ok(tuple) = key.cast::<PyTuple>() {
+        let mut items = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            items.push(classify_key_scalar(&item, dict_path)?);
+        }
+        return Ok(ObjectKey::Other(Box::new(CValue::Tuple(
+            items.into_boxed_slice().into(),
+        ))));
+    }
+
+    Ok(ObjectKey::Other(Box::new(classify_key_scalar(
+        key, dict_path,
+    )?)))
+}
+
+/// Classifies one dict-key scalar (`None`, `bool`, `int`, `float`, `str`,
+/// `datetime`, `date`); shared by a bare key and each element of a `tuple` key.
+fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyResult<CValue> {
+    if obj.is_none() {
+        return Ok(CValue::Null);
+    }
+
+    // `bool` before `int`: a `bool` is a Python `int`.
+    if let Ok(b) = obj.cast::<PyBool>() {
+        return Ok(CValue::Bool(b.is_true()));
+    }
+
+    if let Ok(i) = obj.cast::<PyInt>() {
+        return int_to_value(i, dict_path);
+    }
+
+    if let Ok(f) = obj.cast::<PyFloat>() {
+        return Ok(float_to_value(f.value()));
+    }
+
+    if let Ok(s) = obj.cast::<PyString>() {
+        return Ok(CValue::Str(pystring_to_cstr(s)?));
+    }
+
+    // `datetime` before `date`.
+    if obj.cast::<PyDateTime>().is_ok() {
+        return datetime_to_value(obj, dict_path, None);
+    }
+
+    if obj.cast::<PyDate>().is_ok() {
+        return Ok(CValue::Date(date_fields(obj, dict_path)?.into()));
+    }
+
+    Err(PyTypeError::new_err(format!(
+        "unsupported type for a dict key: {} at {}; a dict key must be \
+         None/bool/int/float/str/datetime/date, a tuple of those, or a \
+         tuple/datetime/date subclass (including a namedtuple)",
+        type_name(obj),
+        render_path(dict_path),
+    )))
+}
+
+/// Converts a Python `str` into a [`CStr`]: UTF-8 when it encodes, else WTF-8
+/// via `encode('utf-8', 'surrogatepass')` for a lone surrogate code point.
+fn pystring_to_cstr(s: &Bound<'_, PyString>) -> PyResult<CStr> {
+    if let Ok(cow) = s.to_cow() {
+        return Ok(CStr::Utf8(cow.into_owned().into_boxed_str()));
+    }
+
+    let bytes: Vec<u8> = s
+        .call_method1("encode", ("utf-8", "surrogatepass"))?
+        .extract()?;
+    Ok(CStr::Wtf8(bytes.into_boxed_slice()))
+}
+
+/// [`pystring_to_cstr`]'s inverse: rebuilds a Python `str` from WTF-8 bytes,
+/// decoding with `surrogatepass` when they are not valid UTF-8.
+fn wtf8_to_pyobject(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.into_py_any(py);
+    }
+
+    PyBytes::new(py, bytes)
+        .call_method1("decode", ("utf-8", "surrogatepass"))?
+        .into_py_any(py)
+}
+
+/// Reads a `date`'s (or a `datetime`'s) `year`/`month`/`day` attributes.
+///
+/// Attributes rather than `PyO3`'s `PyDateAccess` trait: that trait wraps the
+/// `PyDateTime_GET_*` C macros, which the limited API this extension builds
+/// against (`abi3-py39`) does not expose, so it is not compiled at all under
+/// that feature.
+fn date_fields(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<CDate> {
+    let year: i32 = obj.getattr("year")?.extract()?;
+    let month: u8 = obj.getattr("month")?.extract()?;
+    let day: u8 = obj.getattr("day")?.extract()?;
+
+    CDate::new(year, month, day).ok_or_else(|| out_of_range_error("date", path))
+}
+
+/// Converts a `datetime.datetime` (exact or a subclass) — see
+/// [`date_fields`] for why the fields are read as attributes. `class_name`
+/// is the subclass name to attach (`None` for the exact base type) — see
+/// `docs/design/value-model.md`'s "Subclasses" section.
+fn datetime_to_value(
+    obj: &Bound<'_, PyAny>,
+    path: &[PathSegment],
+    class_name: Option<Arc<str>>,
+) -> PyResult<CValue> {
+    let date = date_fields(obj, path)?;
+    let hour: u8 = obj.getattr("hour")?.extract()?;
+    let minute: u8 = obj.getattr("minute")?.extract()?;
+    let second: u8 = obj.getattr("second")?.extract()?;
+    let microsecond: u32 = obj.getattr("microsecond")?.extract()?;
+    let offset = utc_offset_seconds(obj, "datetime", path)?;
+
+    CDateTime::new(date, hour, minute, second, microsecond, offset)
+        .map(|dt| CValue::DateTime(Typed::with_class_name(dt, class_name)))
+        .ok_or_else(|| out_of_range_error("datetime", path))
+}
+
+/// Converts a `datetime.time` (exact or a subclass) — the same field-reading
+/// pattern as [`datetime_to_value`], minus the date. `class_name` is the
+/// subclass name to attach (`None` for the exact base type).
+fn time_to_value(
+    obj: &Bound<'_, PyAny>,
+    path: &[PathSegment],
+    class_name: Option<Arc<str>>,
+) -> PyResult<CValue> {
+    let hour: u8 = obj.getattr("hour")?.extract()?;
+    let minute: u8 = obj.getattr("minute")?.extract()?;
+    let second: u8 = obj.getattr("second")?.extract()?;
+    let microsecond: u32 = obj.getattr("microsecond")?.extract()?;
+    let offset = utc_offset_seconds(obj, "time", path)?;
+
+    CTime::new(hour, minute, second, microsecond, offset)
+        .map(|t| CValue::Time(Typed::with_class_name(t, class_name)))
+        .ok_or_else(|| out_of_range_error("time", path))
+}
+
+/// Converts a `datetime.timedelta` (exact or a subclass), reading its own
+/// already-normalized `days`/`seconds`/`microseconds` attributes — the same
+/// three fields [`utc_offset_seconds`] reads off the `timedelta` a
+/// `utcoffset()` call returns. `class_name` is the subclass name to attach
+/// (`None` for the exact base type).
+fn timedelta_to_value(
+    obj: &Bound<'_, PyAny>,
+    path: &[PathSegment],
+    class_name: Option<Arc<str>>,
+) -> PyResult<CValue> {
+    let days: i64 = obj.getattr("days")?.extract()?;
+    let seconds: i64 = obj.getattr("seconds")?.extract()?;
+    let microseconds: i64 = obj.getattr("microseconds")?.extract()?;
+
+    CTimeDelta::new(days, seconds, microseconds)
+        .map(|td| CValue::TimeDelta(Typed::with_class_name(td, class_name)))
+        .ok_or_else(|| out_of_range_error("timedelta", path))
+}
+
+/// The datetime's/time's fixed UTC offset in whole seconds, or `None` when
+/// it is naive.
+///
+/// Asks the object itself (`utcoffset()`) rather than inspecting `tzinfo`,
+/// so any `tzinfo` implementation — `timezone`, `zoneinfo`, `pytz` — reports
+/// the offset in force at *this* moment, which is what
+/// `datetime_normalize`'s own `astimezone` would use. `type_name` names the
+/// caller's own type (`"datetime"`/`"time"`) for the two error messages.
+fn utc_offset_seconds(
+    obj: &Bound<'_, PyAny>,
+    type_name: &str,
+    path: &[PathSegment],
+) -> PyResult<Option<i32>> {
+    let offset = obj.call_method0("utcoffset")?;
+
+    if offset.is_none() {
+        return Ok(None);
+    }
+
+    let days: i64 = offset.getattr("days")?.extract()?;
+    let seconds: i64 = offset.getattr("seconds")?.extract()?;
+    let microseconds: i64 = offset.getattr("microseconds")?.extract()?;
+
+    if microseconds != 0 {
+        return Err(PyValueError::new_err(format!(
+            "a tzinfo whose utcoffset() is not a whole number of seconds is not supported \
+             (at {}); onix stores a {type_name}'s UTC offset in seconds",
+            render_path(path),
+        )));
+    }
+
+    i32::try_from(days * 86_400 + seconds)
+        .map(Some)
+        .map_err(|_| out_of_range_error(type_name, path))
+}
+
+/// A temporal value whose fields the compact value model rejects.
+fn out_of_range_error(type_name: &str, path: &[PathSegment]) -> PyErr {
+    PyValueError::new_err(format!(
+        "{type_name} at {} is out of range for onix's internal value model",
+        render_path(path),
+    ))
+}
+
+fn int_to_value(i: &Bound<'_, PyInt>, path: &[PathSegment]) -> PyResult<CValue> {
+    if let Ok(v) = i.extract::<i64>() {
+        return Ok(CValue::Number(CNumber::from_i64(v)));
+    }
+
+    if let Ok(v) = i.extract::<u64>() {
+        return Ok(CValue::Number(CNumber::from_u64(v)));
+    }
+
+    // Beyond i64/u64: read the exact value (see `exact_big_int`).
+    // `CNumber::from_bigint` narrows it back to a fast arm if it turns out to
+    // fit one, so only a genuinely large integer keeps the arbitrary-precision
+    // representation.
+    let big = exact_big_int(i).map_err(|err| {
+        PyValueError::new_err(format!(
+            "could not read a large integer at {}: {err}",
+            render_path(path),
+        ))
+    })?;
+
+    Ok(CValue::Number(CNumber::from_bigint(big)))
+}
+
+/// Reads a Python `int`'s exact value through `int`'s unbound
+/// `bit_length`/`to_bytes`, which bypass subclass overrides and the `int`->`str`
+/// digit cap.
+fn exact_big_int(i: &Bound<'_, PyInt>) -> PyResult<BigInt> {
+    let (int_type, kwargs) = int_type_and_signed_kwargs(i.py())?;
+    let bit_length: usize = int_type.getattr("bit_length")?.call1((i,))?.extract()?;
+    // One extra byte so the two's-complement sign bit always has room.
+    let byte_len = bit_length / 8 + 1;
+    let bytes: Vec<u8> = int_type
+        .getattr("to_bytes")?
+        .call((i, byte_len, "little"), Some(&kwargs))?
+        .extract()?;
+
+    Ok(BigInt::from_signed_bytes_le(&bytes))
+}
+
+/// The base `int` type and a `{"signed": True}` kwargs dict for the unbound
+/// `to_bytes`/`from_bytes` calls of [`exact_big_int`] and [`number_to_pyobject`].
+fn int_type_and_signed_kwargs(py: Python<'_>) -> PyResult<(Bound<'_, PyType>, Bound<'_, PyDict>)> {
+    Ok((py.get_type::<PyInt>(), [("signed", true)].into_py_dict(py)?))
+}
+
+/// Every `float` converts, including `NaN`/`Infinity`/`-Infinity`: unlike
+/// JSON, a Python `float` has no finiteness restriction, and
+/// [`CNumber::from_f64`] stores whichever bits it is given.
+fn float_to_value(f: f64) -> CValue {
+    CValue::Number(CNumber::from_f64(f))
+}
+
+fn max_depth_error(max_depth: usize, path: &[PathSegment]) -> PyErr {
+    MaxDepthError::new_err(format!(
+        "python object nesting exceeds the configured max_depth ({max_depth}) while converting \
+         to onix's internal value model, at {}",
+        render_path(path),
+    ))
+}
+
+/// The error for a value `DeepDiff` routes to a handler onix lacks (see
+/// [`object_strategy`]), naming its type and path.
+fn unsupported_type_error(type_name: &str, path: &str) -> PyErr {
+    PyTypeError::new_err(format!(
+        "unsupported type for diffing: {type_name} at {path}; a custom object is diffed by \
+         its attributes, but a value DeepDiff routes to a handler onix lacks \
+         (bytes/bytearray/memoryview or another iterable, a number such as \
+         complex/Decimal/Fraction, uuid, ipaddress, a pydantic model, a class or module) is not",
+    ))
+}
+
+/// The error for an opaque token (see [`opaque`]) a report would have to
+/// show: onix holds the value only by identity.
+pub(crate) fn opaque_error(type_name: &str, path: &str) -> PyErr {
+    PyTypeError::new_err(format!(
+        "cannot report the {type_name} at {path}: onix compares a value it does not convert \
+         (a type DeepDiff routes to a handler onix lacks, or a shared class attribute onix \
+         could not convert) only by identity, and cannot render it"
+    ))
+}
+
+/// The error for an object whose attribute read raised `AttributeError`,
+/// which `DeepDiff` reports as `unprocessed`.
+fn unprocessed_error(obj: &Bound<'_, PyAny>, path: &[PathSegment], err: &PyErr) -> PyErr {
+    PyTypeError::new_err(format!(
+        "could not read the attributes of {} at {}: {err}; DeepDiff reports such an \
+         object as unprocessed",
+        type_name(obj),
+        render_path(path),
+    ))
+}
+
+/// `report` as it renders, each finding's value through
+/// [`deepdiff_core::value::rendered`]. `Err` lists every token left in the render.
+pub(crate) fn render_report(report: &CValue) -> Result<CValue, Vec<Unrendered>> {
+    let CValue::Object(categories) = report else {
+        return Ok(report.clone());
+    };
+    let mut builder = Builder::new();
+    let mut unrendered = Vec::new();
+    let mut rendered_categories = Vec::with_capacity(categories.len());
+    for (category, findings) in categories {
+        let CValue::Object(findings) = findings else {
+            rendered_categories.push((category.clone(), findings.clone()));
+            continue;
+        };
+        let compared = matches!(category.as_str(), Some("values_changed" | "type_changes"));
+        let mut rendered_findings = Vec::with_capacity(findings.len());
+        for (finding_path, finding) in findings {
+            let path = match finding_path {
+                ObjectKey::Str(key) => String::from_utf8_lossy(key.as_bytes()).into_owned(),
+                ObjectKey::Other(_) => String::new(),
+            };
+            let finding = match finding {
+                CValue::Object(entry) if compared => {
+                    let mut fields = Vec::with_capacity(entry.len());
+                    for (field, value) in entry {
+                        let value = if matches!(field.as_str(), Some("old_value" | "new_value")) {
+                            rendered_at(value, &path, &mut unrendered)
+                        } else {
+                            value.clone()
+                        };
+                        fields.push((field.clone(), value));
+                    }
+                    builder.object_with_keys(fields)
+                }
+                _ => rendered_at(finding, &path, &mut unrendered),
+            };
+            rendered_findings.push((finding_path.clone(), finding));
+        }
+        rendered_categories.push((
+            category.clone(),
+            builder.object_with_keys(rendered_findings),
+        ));
+    }
+    if unrendered.is_empty() {
+        Ok(builder.object_with_keys(rendered_categories))
+    } else {
+        Err(unrendered)
+    }
+}
+
+/// [`deepdiff_core::value::rendered`] for the finding value at `path`, adding the
+/// tokens left in it to `unrendered`.
+fn rendered_at(value: &CValue, path: &str, unrendered: &mut Vec<Unrendered>) -> CValue {
+    rendered(value).unwrap_or_else(|tokens| {
+        unrendered.extend(tokens.into_iter().map(|token| Unrendered {
+            path: format!(
+                "{path}{}",
+                &render_path(&token.path).to_string()["root".len()..]
+            ),
+            type_name: token.type_name,
+            identity: token.identity,
+        }));
+        value.clone()
+    })
+}
+
+/// A token left in a rendered report: its full path, its type name and its
+/// identity.
+pub(crate) struct Unrendered {
+    pub(crate) path: String,
+    pub(crate) type_name: String,
+    pub(crate) identity: String,
+}
+
+/// The error for an object that reached a set member but is not a type one may be.
+fn unhashable_member_error(obj: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyErr {
+    PyTypeError::new_err(format!(
+        "unsupported type for a set member: {} at {}; a set member must be \
+         None/bool/int/float/str/tuple/frozenset/datetime/date/time/timedelta, or a \
+         datetime/date/time/timedelta subclass (a tuple/frozenset subclass, including a \
+         namedtuple, is not accepted as a set member)",
+        type_name(obj),
+        render_path(path),
+    ))
+}
+
+fn type_name(obj: &Bound<'_, PyAny>) -> String {
+    obj.get_type()
+        .name()
+        .map_or_else(|_| "<unknown type>".to_string(), |name| name.to_string())
+}
+
+/// `type_name`, as the `Arc<str>` [`Typed`]/[`SetItems`]/`deepdiff_core::value::Object`
+/// carry for a subclass instance — see `docs/design/value-model.md`'s
+/// "Subclasses" section.
+fn class_name(obj: &Bound<'_, PyAny>) -> Arc<str> {
+    Arc::from(type_name(obj))
+}
+
+/// An [`deepdiff_core::value::Object`]'s class as onix carries it: the `__name__`
+/// `DeepDiff` renders, the identity onix decides `type_changes` by (see
+/// `deepdiff_core::value::Object::same_class`), and the object's `ignore_order`
+/// lengths.
+struct PyClass {
+    name: Arc<str>,
+    identity: Arc<str>,
+    lengths: ObjectLengths,
+    class_attributes: Vec<Arc<str>>,
+    instance: Option<usize>,
+}
+
+/// The [`PyClass`] of `obj`'s type, identified by the type object's address;
+/// `held` keeps the type object alive so the address stays unique.
+fn py_class(obj: &Bound<'_, PyAny>, lengths: ObjectLengths, held: &mut Held) -> PyClass {
+    let ty = obj.get_type();
+    let identity = Arc::from(format!("{:x}", ty.as_ptr() as usize));
+    held.objects.push(ty.into_any().unbind());
+    PyClass {
+        name: class_name(obj),
+        identity,
+        lengths,
+        class_attributes: Vec::new(),
+        instance: None,
+    }
+}
+
+/// Which Python sequence [`value_to_pyobject`] rebuilds a run of items into.
+#[derive(Clone, Copy)]
+enum SeqKind {
+    List,
+    Tuple,
+    Set,
+    FrozenSet,
+}
+
+impl SeqKind {
+    fn build(self, py: Python<'_>, items: Vec<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        match self {
+            SeqKind::List => items.into_py_any(py),
+            SeqKind::Tuple => PyTuple::new(py, items)?.into_py_any(py),
+            SeqKind::Set => PySet::new(py, items)?.into_py_any(py),
+            SeqKind::FrozenSet => PyFrozenSet::new(py, items)?.into_py_any(py),
+        }
+    }
+}
+
+/// One in-progress container on [`value_to_pyobject`]'s work-stack, the mirror of [`Frame`].
+enum RenderFrame<'py, 'v> {
+    Seq {
+        kind: SeqKind,
+        remaining: std::slice::Iter<'v, CValue>,
+        built: Vec<Py<PyAny>>,
+    },
+    Object {
+        remaining: Entries<'v>,
+        built: Bound<'py, PyDict>,
+        current_key: &'v ObjectKey,
+    },
+}
+
+/// Converts a rendered report [`deepdiff_core::Value`] into the native Python
+/// object [`crate::deepdiff::DeepDiff::to_dict`] returns, with an explicit
+/// stack. The report is a `Value`, not JSON, so a `tuple` comes back as a
+/// `tuple`.
+pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<PyAny>> {
+    let mut stack: Vec<RenderFrame<'_, '_>> = Vec::new();
+    let mut pending: Option<&CValue> = Some(value);
+    let mut finished: Option<Py<PyAny>> = None;
+
+    loop {
+        if let Some(current) = pending.take() {
+            let step = match current {
+                CValue::Null => RenderStep::Done(py.None()),
+                CValue::Bool(b) => RenderStep::Done(b.into_py_any(py)?),
+                CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n)?),
+                CValue::Str(s) => RenderStep::Done(wtf8_to_pyobject(py, s.as_bytes())?),
+                // Renders back as the plain base type, never the subclass instance:
+                // docs/design/value-conversion.md's "Subclasses" section.
+                CValue::DateTime(value) => {
+                    RenderStep::Done(datetime_to_pyobject(py, value.value())?)
+                }
+                CValue::Date(value) => RenderStep::Done(date_to_pyobject(py, value.value())?),
+                CValue::Time(value) => RenderStep::Done(time_to_pyobject(py, value.value())?),
+                CValue::TimeDelta(value) => {
+                    RenderStep::Done(timedelta_to_pyobject(py, value.value())?)
+                }
+                CValue::Array(items) => {
+                    start_sequence(py, SeqKind::List, items, &mut stack, &mut pending)?
+                }
+                CValue::Tuple(items) => {
+                    start_sequence(py, SeqKind::Tuple, items, &mut stack, &mut pending)?
+                }
+                CValue::Set(items) => {
+                    start_sequence(py, SeqKind::Set, items, &mut stack, &mut pending)?
+                }
+                CValue::FrozenSet(items) => {
+                    start_sequence(py, SeqKind::FrozenSet, items, &mut stack, &mut pending)?
+                }
+                CValue::Object(map) => {
+                    let mut iter = map.iter();
+
+                    match iter.next() {
+                        None => RenderStep::Done(PyDict::new(py).into_py_any(py)?),
+                        Some((key, first_value)) => {
+                            stack.push(RenderFrame::Object {
+                                remaining: iter,
+                                built: PyDict::new(py),
+                                current_key: key,
+                            });
+                            pending = Some(first_value);
+                            RenderStep::Descend
+                        }
+                    }
+                }
+            };
+
+            match step {
+                RenderStep::Descend => continue,
+                RenderStep::Done(value) => finished = Some(value),
+            }
+        }
+
+        let rendered = finished.take().expect(
+            "loop invariant: every iteration either sets `pending` (and `continue`s) or `finished`",
+        );
+
+        match stack.pop() {
+            None => return Ok(rendered),
+            Some(RenderFrame::Seq {
+                kind,
+                mut remaining,
+                mut built,
+            }) => {
+                built.push(rendered);
+
+                match remaining.next() {
+                    Some(next_item) => {
+                        pending = Some(next_item);
+                        stack.push(RenderFrame::Seq {
+                            kind,
+                            remaining,
+                            built,
+                        });
+                    }
+                    None => finished = Some(kind.build(py, built)?),
+                }
+            }
+            Some(RenderFrame::Object {
+                mut remaining,
+                built,
+                current_key,
+            }) => {
+                built.set_item(object_key_to_pyobject(py, current_key)?, rendered)?;
+
+                match remaining.next() {
+                    Some((key, next_value)) => {
+                        pending = Some(next_value);
+                        stack.push(RenderFrame::Object {
+                            remaining,
+                            built,
+                            current_key: key,
+                        });
+                    }
+                    None => finished = Some(built.into_py_any(py)?),
+                }
+            }
+        }
+    }
+}
+
+/// Rebuilds one [`ObjectKey`] as a Python dict key. A non-`str` key is at most
+/// a flat tuple, so the recursion is two levels.
+fn object_key_to_pyobject(py: Python<'_>, key: &ObjectKey) -> PyResult<Py<PyAny>> {
+    match key {
+        ObjectKey::Str(s) => wtf8_to_pyobject(py, s.as_bytes()),
+        ObjectKey::Other(value) => value_to_pyobject(py, value),
+    }
+}
+
+/// Rebuilds a `datetime.date`.
+fn date_to_pyobject(py: Python<'_>, value: CDate) -> PyResult<Py<PyAny>> {
+    PyDate::new(py, value.year(), value.month(), value.day())?.into_py_any(py)
+}
+
+/// Rebuilds a `datetime.datetime`, aware values carrying a fixed-offset
+/// `datetime.timezone` (a zero offset is Python's own `timezone.utc`
+/// singleton) — see `tests/golden/README.md`'s "Normalized versus raw
+/// datetimes" section, its "Fixed-offset `tzinfo` round-trip" point.
+fn datetime_to_pyobject(py: Python<'_>, value: CDateTime) -> PyResult<Py<PyAny>> {
+    let tzinfo = value
+        .utc_offset_seconds()
+        .map(|offset| PyTzInfo::fixed_offset(py, PyDelta::new(py, 0, offset, 0, true)?))
+        .transpose()?;
+    let date = value.date();
+
+    PyDateTime::new(
+        py,
+        date.year(),
+        date.month(),
+        date.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.microsecond(),
+        tzinfo.as_ref(),
+    )?
+    .into_py_any(py)
+}
+
+/// Rebuilds a `datetime.time`, aware values carrying a fixed-offset
+/// `datetime.timezone` — [`datetime_to_pyobject`]'s twin minus the date.
+fn time_to_pyobject(py: Python<'_>, value: CTime) -> PyResult<Py<PyAny>> {
+    let tzinfo = value
+        .utc_offset_seconds()
+        .map(|offset| PyTzInfo::fixed_offset(py, PyDelta::new(py, 0, offset, 0, true)?))
+        .transpose()?;
+
+    PyTime::new(
+        py,
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.microsecond(),
+        tzinfo.as_ref(),
+    )?
+    .into_py_any(py)
+}
+
+/// Rebuilds a `datetime.timedelta` from its own normalized
+/// `(days, seconds, microseconds)`.
+fn timedelta_to_pyobject(py: Python<'_>, value: CTimeDelta) -> PyResult<Py<PyAny>> {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "deepdiff_core::datetime::TimeDelta's own days/seconds/microseconds are already \
+                  bounded to Python's own timedelta range, which fits i32"
+    )]
+    PyDelta::new(
+        py,
+        value.days() as i32,
+        value.seconds() as i32,
+        value.microseconds() as i32,
+        true,
+    )?
+    .into_py_any(py)
+}
+
+/// One step of [`value_to_pyobject`]'s loop: a value finished outright, or
+/// a container whose first child was just made pending.
+enum RenderStep {
+    Done(Py<PyAny>),
+    Descend,
+}
+
+/// Starts one sequence-shaped value: an empty one is finished outright, a
+/// non-empty one parks a [`RenderFrame::Seq`] and makes its first item
+/// pending. Shared by all four sequence shapes, which differ only in the
+/// Python object [`SeqKind::build`] finally produces.
+fn start_sequence<'py, 'v>(
+    py: Python<'py>,
+    kind: SeqKind,
+    items: &'v [CValue],
+    stack: &mut Vec<RenderFrame<'py, 'v>>,
+    pending: &mut Option<&'v CValue>,
+) -> PyResult<RenderStep> {
+    let mut remaining = items.iter();
+
+    let Some(first) = remaining.next() else {
+        return Ok(RenderStep::Done(kind.build(py, Vec::new())?));
+    };
+
+    let capacity = remaining.len().saturating_add(1);
+    stack.push(RenderFrame::Seq {
+        kind,
+        remaining,
+        built: Vec::with_capacity(capacity),
+    });
+    *pending = Some(first);
+    Ok(RenderStep::Descend)
+}
+
+fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {
+    if !n.is_f64() {
+        if let Some(v) = n.as_i64() {
+            return v.into_py_any(py);
+        }
+
+        if let Some(v) = n.as_u64() {
+            return v.into_py_any(py);
+        }
+
+        // An arbitrary-precision integer: `int.from_bytes`, the inverse of `exact_big_int`'s read.
+        if let Some(big) = n.as_big() {
+            let (int_type, kwargs) = int_type_and_signed_kwargs(py)?;
+            let bytes = big.to_signed_bytes_le();
+            return int_type
+                .getattr("from_bytes")?
+                .call((PyBytes::new(py, &bytes), "little"), Some(&kwargs))?
+                .into_py_any(py);
+        }
+    }
+
+    n.as_f64()
+        .expect("a non-integer Number is always an f64")
+        .into_py_any(py)
+}
+
+/// Every custom object in `values` by the identity a cycle token pointing back
+/// at it carries, for the resolver to lend the diff.
+pub(crate) fn objects_by_identity<'v>(values: &[&'v CValue]) -> HashMap<String, &'v CValue> {
+    let mut index = HashMap::new();
+    let mut stack: Vec<&CValue> = values.to_vec();
+    while let Some(value) = stack.pop() {
+        match value {
+            CValue::Object(map) => {
+                if let Some(instance) = map.instance() {
+                    index.insert(format!("{instance:x}"), value);
+                }
+                stack.extend(map.values());
+            }
+            CValue::Array(items) | CValue::Tuple(items) => stack.extend(items.iter()),
+            _ => {}
+        }
+    }
+    index
+}

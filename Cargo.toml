@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/deepdiff-python"]
+members = ["crates/deepdiff-core", "crates/deepdiff-python"]
 
 [workspace.package]
 version = "0.1.0"

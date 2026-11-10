@@ -1,8 +1,10 @@
-//! The Python-facing DeepDiff class, adapted from the pinned Onix revision.
-//! The only local change is the public module name: `deepdiff`.
+//! The drop-in `DeepDiff` class: accepts live Python objects, converts them
+//! to `deepdiff_core`'s value model exactly once, diffs natively, and exposes
+//! the result as `.to_json()`/`.to_dict()`. Supported types and raised
+//! errors: the README's "Known limitations" section.
 
-use onix_core::Value;
-use onix_core::diff::Resolution;
+use deepdiff_core::Value;
+use deepdiff_core::diff::Resolution;
 use pyo3::prelude::*;
 
 use crate::convert::{
@@ -11,11 +13,20 @@ use crate::convert::{
 };
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
 
+/// A drop-in subset of `deepdiff.DeepDiff`, diffing `t1`/`t2` at
+/// `verbose_level=2`. `max_depth` defaults to 512; deeper input raises
+/// `MaxDepthError`. Supported types and errors:
+/// <https://github.com/ksco92/onix#known-limitations>
 #[pyclass(module = "deepdiff_rs")]
 pub(crate) struct DeepDiff {
     report_value: Value,
+    /// Whether `report_value` needs the worker thread to render; computed once
+    /// so `to_json` never re-walks it. See `crate::guard::is_deep`.
     report_is_deep: bool,
+    /// The resolved `max_depth`, which bounds the report's nesting.
     max_depth: usize,
+    /// Whether either input held a lone surrogate code point, found during
+    /// conversion; lets `to_json` skip its own WTF-8 tree walk when `false`.
     may_have_wtf8: bool,
 }
 
@@ -34,6 +45,8 @@ impl DeepDiff {
         let mut held = Held::new(opts.max_depth);
         let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
         let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
+        // A class attribute or cycle token is resolved the first time the
+        // diff compares one, then the diff reruns with it available.
         let mut index = None;
         let mut deep = false;
         let report_value = loop {
@@ -85,6 +98,8 @@ impl DeepDiff {
             report_value
         };
         let report_is_deep = is_deep(&report_value);
+        // Conservative: the report only ever carries values already in
+        // `t1`/`t2`, so this may overcount but never undercounts.
         let may_have_wtf8 = a_may_have_wtf8 || b_may_have_wtf8 || held.saw_wtf8;
 
         Ok(Self {
@@ -95,6 +110,11 @@ impl DeepDiff {
         })
     }
 
+    /// The report as a `DeepDiff`-compatible JSON string at
+    /// `verbose_level=2`; a deep report renders on the sized worker thread
+    /// rather than inline. Differences from `DeepDiff`'s rendering are
+    /// documented in the onix repository's `tests/golden/README.md`, 'JSON
+    /// supersets' and 'Set iteration order' sections.
     fn to_json(&self, py: Python<'_>) -> PyResult<String> {
         serialize_value(
             py,
@@ -105,15 +125,24 @@ impl DeepDiff {
         )
     }
 
+    /// The report as a native Python dict, Python types (tuples, sets,
+    /// datetimes) intact. Differences from `DeepDiff`'s `to_dict()`:
+    /// `tests/golden/README.md` in the onix repository.
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         value_to_pyobject(py, &self.report_value)
     }
 
+    /// `if diff:` truthiness — falsy exactly when `t1`/`t2` had no
+    /// differences (an empty report).
     fn __bool__(&self) -> bool {
-        !matches!(&self.report_value, Value::Object(map) if map.is_empty())
+        !is_empty_report(&self.report_value)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!("DeepDiff({})", self.to_json(py)?))
     }
+}
+
+fn is_empty_report(value: &Value) -> bool {
+    matches!(value, Value::Object(map) if map.is_empty())
 }

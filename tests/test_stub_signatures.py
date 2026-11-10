@@ -1,0 +1,149 @@
+"""Checks that ``deepdiff_rs.pyi`` cannot drift from the built module.
+
+Compares each stub function, method, and property's parameter names, defaults,
+and keyword-only markers against ``inspect.signature()`` of the compiled object.
+"""
+
+import ast
+import functools
+import importlib.metadata
+import inspect
+import re
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+import deepdiff_rs
+
+STUB_PATH = Path(__file__).resolve().parent.parent / "python" / "deepdiff_rs" / "__init__.pyi"
+
+
+def _params(args: ast.arguments) -> list[tuple[str, bool, bool]]:
+    """One ``(name, has_default, keyword_only)`` tuple per stub parameter,
+    in declaration order, skipping ``self``."""
+    result = []
+    positional = args.posonlyargs + args.args
+    defaults_start = len(positional) - len(args.defaults)
+    for i, arg in enumerate(positional):
+        if arg.arg == "self":
+            continue
+        result.append((arg.arg, i >= defaults_start, False))
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+        result.append((arg.arg, default is not None, True))
+    return result
+
+
+def _runtime_params(func: object) -> list[tuple[str, bool, bool]]:
+    """The same shape as :func:`_params`, from a real callable's
+    ``inspect.signature``, skipping ``self``."""
+    result = []
+    for name, param in inspect.signature(func).parameters.items():
+        if name == "self":
+            continue
+        result.append(
+            (
+                name,
+                param.default is not inspect.Parameter.empty,
+                param.kind is inspect.Parameter.KEYWORD_ONLY,
+            )
+        )
+    return result
+
+
+def _is_property(node: ast.FunctionDef) -> bool:
+    return any(isinstance(d, ast.Name) and d.id == "property" for d in node.decorator_list)
+
+
+def _class_members(node: ast.ClassDef) -> dict[str, ast.FunctionDef]:
+    return {n.name: n for n in node.body if isinstance(n, ast.FunctionDef)}
+
+
+MODULE = ast.parse(STUB_PATH.read_text())
+FUNCTIONS = {node.name: node for node in MODULE.body if isinstance(node, ast.FunctionDef)}
+CLASSES = {node.name: node for node in MODULE.body if isinstance(node, ast.ClassDef)}
+
+# Module-level annotated assignments (``NAME: type``) in the stub.
+CONSTANTS = {
+    node.target.id for node in MODULE.body if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+}
+
+
+def test_stub_declares_the_whole_public_surface() -> None:
+    """Every public name the built module actually exports has a stub entry, and vice versa.
+    """
+    module_names = {
+        n for n in dir(deepdiff_rs) if (not n.startswith("_") or n == "__version__") and n != "deepdiff_rs"
+    }
+    stub_names = set(FUNCTIONS) | set(CLASSES) | CONSTANTS
+    assert module_names == stub_names
+    assert isinstance(deepdiff_rs.MAX_DEPTH_CEILING, int)
+    assert isinstance(deepdiff_rs.__version__, str)
+
+
+def test_version_matches_the_published_distribution() -> None:
+    assert deepdiff_rs.__version__ == importlib.metadata.version("deepdiff-rust")
+
+
+@pytest.mark.parametrize("name", sorted(FUNCTIONS))
+def test_module_function_signature_matches_the_stub(name: str) -> None:
+    stub_params = _params(FUNCTIONS[name].args)
+    runtime_params = _runtime_params(getattr(deepdiff_rs, name))
+    assert stub_params == runtime_params
+
+
+def test_deepdiff_init_signature_matches_the_stub() -> None:
+    if sys.version_info < (3, 10):
+        pytest.skip(
+            "CPython 3.9 leaves a PyO3 extension class's own __text_signature__ "
+            "unset (fixed by 3.10), so inspect.signature() cannot recover it"
+        )
+
+    init = _class_members(CLASSES["DeepDiff"])["__init__"]
+    stub_params = _params(init.args)
+    runtime_params = _runtime_params(deepdiff_rs.DeepDiff)
+    assert stub_params == runtime_params
+
+
+def _every_stub_method() -> list[tuple[str, str]]:
+    """Every non-``__init__``, non-property method declared on a stub class."""
+    pairs = []
+    for class_name, node in CLASSES.items():
+        for method_name, member in _class_members(node).items():
+            if method_name == "__init__" or _is_property(member):
+                continue
+            pairs.append((class_name, method_name))
+    return sorted(pairs)
+
+
+@pytest.mark.parametrize(("class_name", "method_name"), _every_stub_method())
+def test_method_signature_matches_the_stub(class_name: str, method_name: str) -> None:
+    node = _class_members(CLASSES[class_name])[method_name]
+    stub_params = _params(node.args)
+    real_class = getattr(deepdiff_rs, class_name)
+    runtime_params = _runtime_params(getattr(real_class, method_name))
+    assert stub_params == runtime_params
+
+
+STUB_ITEMS = {
+    **FUNCTIONS,
+    **CLASSES,
+    **{f"{c}.{m}": n for c, node in CLASSES.items() for m, n in _class_members(node).items()},
+}
+
+
+@pytest.mark.parametrize("path", sorted(STUB_ITEMS))
+def test_stub_docstring_is_the_runtime_first_sentence(path: str) -> None:
+    """The stub carries each item's first runtime ``__doc__`` sentence, or none for a slot."""
+    runtime = functools.reduce(getattr, path.split("."), deepdiff_rs)
+    doc = None if isinstance(runtime, types.WrapperDescriptorType) else runtime.__doc__
+    first = re.split(r"(?<=\.)\s", doc.strip(), maxsplit=1)[0] if doc else None
+    expected = " ".join(first.split()).replace("`", "``") if first else None
+    assert ast.get_docstring(STUB_ITEMS[path]) == expected
+
+
+def test_max_depth_error_is_a_value_error_subclass_in_both_places() -> None:
+    (base,) = CLASSES["MaxDepthError"].bases
+    assert isinstance(base, ast.Name) and base.id == "ValueError"
+    assert issubclass(deepdiff_rs.MaxDepthError, ValueError)

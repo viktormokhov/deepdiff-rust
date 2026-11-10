@@ -4,12 +4,12 @@
 
 - Reference package: `deepdiff==9.1.0`
 - Python support target: CPython 3.10+
-- Upstream engine under evaluation: Onix 0.17.1
-- Pinned upstream revision: `85956c7f3c39d4e39697815714e92a21c0c74ce4`
+- Engine: forked from Onix 0.17.1
+- Fork point: `85956c7f3c39d4e39697815714e92a21c0c74ce4`
 
 ## Current status
 
-This repository integrates the pinned Onix Python adapter and Rust core. It is
+This repository contains the forked Onix Python adapter and Rust core. It is
 **not yet a complete drop-in replacement** for DeepDiff: the exposed constructor
 currently supports only the options wired through the upstream adapter
 (`ignore_order` and `max_depth`).

@@ -1,7 +1,7 @@
 # deepdiff-rust
 
-A Rust-backed implementation of the core `DeepDiff` API, using the
-[Onix](https://github.com/ksco92/onix) engine through a pinned Git submodule.
+A Rust implementation of the `DeepDiff` API for Python. The engine started
+as a fork of [Onix](https://github.com/ksco92/onix) and is maintained here.
 
 > **Status: early development.** This repository is not yet a complete
 > replacement for the `deepdiff` package. The initial target is the
@@ -12,7 +12,7 @@ A Rust-backed implementation of the core `DeepDiff` API, using the
 Build from source with Rust, Python 3.10+, and Maturin:
 
 ```bash
-git clone --recurse-submodules https://github.com/viktormokhov/deepdiff-rust.git
+git clone https://github.com/viktormokhov/deepdiff-rust.git
 cd deepdiff-rust
 python -m venv .venv
 . .venv/bin/activate
@@ -35,27 +35,23 @@ The project distribution is named `deepdiff-rust`; its import package is `deepdi
 
 ## Architecture
 
-- `vendor/onix`: upstream Onix source, pinned as a Git submodule to an exact
-  revision. See [ADR 0001](docs/architecture/adr-0001-onix-core.md).
+- `crates/deepdiff-core`: comparison engine, paths, reports (forked from Onix,
+  see [ADR 0002](docs/architecture/adr-0002-fork-onix.md)).
 - `crates/deepdiff-python`: PyO3 extension and the public Python package
   integration.
 - `python/deepdiff_rs`: Python import facade.
 - `tests`: Python API and differential tests.
 
-The upstream Rust core performs structural comparison. The Python adapter
-converts supported live Python objects into Onix's compact value model and
+The Rust core performs structural comparison. The Python adapter
+converts supported live Python objects into the core value model and
 renders DeepDiff-compatible reports. JSON strings use a separate fast path
 that parses, diffs, and serializes in Rust.
 
 ## Compatibility
 
 The reference target is `deepdiff==9.1.0`. Compatibility is a work in progress,
-not a blanket guarantee. The pinned Onix revision supports a useful subset of
-DeepDiff's core behavior, including ordered comparisons and
-`ignore_order=True`, but does not implement every DeepDiff option or module.
-
-See [the compatibility matrix](docs/compatibility.md) and upstream
-[known limitations](https://github.com/ksco92/onix#known-limitations).
+not a blanket guarantee. The target is full parity; see [the compatibility matrix](docs/compatibility.md)
+for what is implemented today.
 
 ## Performance
 
@@ -75,18 +71,12 @@ maturin develop --release
 pytest -q
 ```
 
-Always clone with `--recurse-submodules`. If the submodule is missing:
-
-```bash
-git submodule update --init --recursive
-```
-
 ## Third-party code
 
-The comparison engine and Python conversion modules currently reuse code from
+The comparison engine and Python conversion modules are forked from
 Onix, Copyright (c) 2026 Rodrigo Carvajal, under the MIT License. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the upstream
-[LICENSE](https://github.com/ksco92/onix/blob/main/LICENSE).
+[LICENSE-ONIX](LICENSE-ONIX).
 
 ## License
 
