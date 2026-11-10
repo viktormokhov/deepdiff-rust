@@ -21,6 +21,7 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
       - run: cargo test --workspace
+      - run: cargo test --manifest-path vendor/onix/Cargo.toml -p onix-core
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   python:
