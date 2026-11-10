@@ -1,47 +1,96 @@
 # deepdiff-rust
 
-A Rust-powered diff engine with Python bindings, targeting compatibility with
-[DeepDiff](https://github.com/seperman/deepdiff).
+A Rust-backed implementation of the core `DeepDiff` API, using the
+[Onix](https://github.com/ksco92/onix) engine through a pinned Git submodule.
 
-> **Status: early development.** The current repository is a project scaffold.
-> API compatibility and performance claims will be made only after differential
-> tests against a pinned DeepDiff release and reproducible benchmarks.
+> **Status: early development.** This repository is not yet a complete
+> replacement for the `deepdiff` package. The initial target is the
+> `DeepDiff` comparison API and its live-Python-object conversion path.
 
-## Goals
+## Quick start
 
-- Provide a fast Rust core for recursive structural comparison.
-- Expose a Python API through PyO3 and build wheels with Maturin.
-- Preserve Python type information where possible; avoid forcing arbitrary
-  Python objects through JSON.
-- Establish differential tests against the reference DeepDiff implementation.
-- Measure runtime and peak memory on representative workloads, including
-  million-element collections.
+Build from source with Rust, Python 3.10+, and Maturin:
+
+```bash
+git clone --recurse-submodules https://github.com/viktormokhov/deepdiff-rust.git
+cd deepdiff-rust
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install maturin pytest
+maturin develop --release
+python -m pytest
+```
+
+The package currently exposes the familiar import path:
+
+```python
+from deepdiff import DeepDiff
+
+diff = DeepDiff({"a": 1}, {"a": 2})
+print(diff.to_dict())
+print(diff.to_json())
+```
+
+**Important:** uninstall the original `deepdiff` distribution before installing
+this project, because both distributions provide the top-level `deepdiff`
+Python package. The project distribution is named `deepdiff-rust`.
+
+## Architecture
+
+- `vendor/onix`: upstream Onix source, pinned as a Git submodule to an exact
+  revision. See [ADR 0001](docs/architecture/adr-0001-onix-core.md).
+- `crates/deepdiff-python`: PyO3 extension and the public Python package
+  integration.
+- `python/deepdiff`: Python import facade.
+- `tests`: Python API and differential tests.
+
+The upstream Rust core performs structural comparison. The Python adapter
+converts supported live Python objects into Onix's compact value model and
+renders DeepDiff-compatible reports. JSON strings use a separate fast path
+that parses, diffs, and serializes in Rust.
+
+## Compatibility
+
+The reference target is `deepdiff==9.1.0`. Compatibility is a work in progress,
+not a blanket guarantee. The pinned Onix revision supports a useful subset of
+DeepDiff's core behavior, including ordered comparisons and
+`ignore_order=True`, but does not implement every DeepDiff option or module.
+
+See [the compatibility matrix](docs/compatibility.md) and upstream
+[known limitations](https://github.com/ksco92/onix#known-limitations).
+
+## Performance
+
+Upstream publishes reproducible benchmarks against DeepDiff 9.1.0, including
+a one-million-key dictionary comparison. Those numbers are upstream results,
+not yet independently reproduced in this repository and not a promise for
+every workload. Our benchmarks will measure Python conversion, Rust diffing,
+report rendering, end-to-end latency, and peak RSS separately.
 
 ## Development
 
-Prerequisites: stable Rust toolchain, Python 3.10+, and Maturin.
-
 ```bash
-python -m pip install maturin pytest
-maturin develop --manifest-path crates/deepdiff-python/Cargo.toml
-pytest
 cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+maturin develop --release
+pytest -q
 ```
 
-## Project layout
+Always clone with `--recurse-submodules`. If the submodule is missing:
 
-- `crates/deepdiff-core`: Python-independent comparison engine.
-- `crates/deepdiff-python`: PyO3 extension module.
-- `python/deepdiff_rust`: Python package facade.
-- `tests`: Python API and differential tests.
+```bash
+git submodule update --init --recursive
+```
 
-## Compatibility policy
+## Third-party code
 
-The initial target is the public `DeepDiff` API from DeepDiff 9.1.0. Full
-compatibility is a goal, not an assumption. Unsupported options must fail
-clearly rather than silently produce misleading results.
+The comparison engine and Python conversion modules currently reuse code from
+Onix, Copyright (c) 2026 Rodrigo Carvajal, under the MIT License. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the upstream
+[LICENSE](https://github.com/ksco92/onix/blob/main/LICENSE).
 
 ## License
 
-License selection is pending an implementation and dependency audit. No code
-from third-party projects is copied into this repository at this stage.
+The integration code in this repository is MIT-licensed. Third-party notices
+and their respective licenses remain applicable.
