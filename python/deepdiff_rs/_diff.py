@@ -2,7 +2,9 @@
 
 import ast
 import datetime
+import decimal
 import json
+import uuid
 
 from . import _native
 from ._options import native_options
@@ -13,6 +15,7 @@ _BUILTIN_TYPES = {
     for t in (
         type(None), bool, int, float, str, list, tuple, set, frozenset, dict,
         datetime.datetime, datetime.date, datetime.time, datetime.timedelta,
+        bytes, complex, decimal.Decimal, uuid.UUID,
     )
 }
 
@@ -53,7 +56,7 @@ class DeepDiff(dict):
         math_epsilon=None, use_log_scale=False, log_scale_similarity_threshold=0.1,
         ignore_nan_inequality=False, ignore_string_case=False, ignore_numeric_type_changes=False,
         ignore_string_type_changes=False, ignore_type_in_groups=None, ignore_type_subclasses=False,
-        truncate_datetime=None,
+        truncate_datetime=None, ignore_uuid_types=False, use_enum_value=False,
     ):
         if view != "text":
             raise NotImplementedError(f"view={view!r} is not supported yet; only view='text' is.")
@@ -64,7 +67,7 @@ class DeepDiff(dict):
         skip = skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types)
         self._native = _native.DeepDiff(
             t1, t2, ignore_order=ignore_order, max_depth=max_depth, exclude_types=exclude_types,
-            ignore_private_variables=ignore_private_variables, skip=skip,
+            ignore_private_variables=ignore_private_variables, skip=skip, use_enum_value=use_enum_value,
             **native_options(
                 _BUILTIN_TYPES, significant_digits=significant_digits,
                 number_format_notation=number_format_notation, math_epsilon=math_epsilon,
@@ -75,7 +78,7 @@ class DeepDiff(dict):
                 ignore_string_type_changes=ignore_string_type_changes,
                 ignore_type_in_groups=ignore_type_in_groups,
                 ignore_type_subclasses=ignore_type_subclasses,
-                truncate_datetime=truncate_datetime,
+                truncate_datetime=truncate_datetime, ignore_uuid_types=ignore_uuid_types,
             ),
         )
         super().__init__(self.to_dict())

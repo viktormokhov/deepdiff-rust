@@ -12,8 +12,8 @@ use crate::path::{PathSegment, render_path};
 use crate::report::Report;
 
 use super::{
-    DiffOptions, array_diff, datetime_diff, numeric_diff, object_diff, scalar_diff, set_diff,
-    type_change_report,
+    DiffOptions, array_diff, datetime_diff, effective_type_name, leaf_diff, numbers_match,
+    numeric_diff, object_diff, scalar_diff, set_diff, type_change_report,
 };
 
 /// The recursive core of [`diff_with_max_depth()`](super::diff_with_max_depth): identical
@@ -107,6 +107,13 @@ pub(crate) fn diff_at(
         (Value::Object(_), _) | (_, Value::Object(_)) => {
             object_pair_diff(path, a, b, depth, opts, memo)
         }
+        (Value::Leaf(old), Value::Leaf(new)) if old.type_name() == new.type_name() => {
+            if same_class(a, b) || opts.same_group(a, b) {
+                leaf_diff(path, a, b, depth, opts)
+            } else {
+                type_change_report(path, a, b, depth, opts.max_depth)
+            }
+        }
         _ if opts.same_group(a, b) => grouped_diff(path, a, b, depth, opts, memo),
         _ => type_change_report(path, a, b, depth, opts.max_depth),
     }
@@ -135,6 +142,16 @@ fn object_pair_diff(
         let a = resolved_a.as_deref().unwrap_or(a);
         let b = resolved_b.as_deref().unwrap_or(b);
         return diff_at(path, a, b, depth, opts, memo);
+    }
+    if opts.use_enum_value
+        && !same_class(a, b)
+        && let Some((a, b)) = enum_values(a, b)
+    {
+        if effective_type_name(a) == effective_type_name(b) {
+            return diff_at(path, a, b, depth, opts, memo);
+        }
+        let equal = grouped_scalars_equal(a, b, opts);
+        return scalar_diff(path, equal, a, b, depth, opts.max_depth);
     }
     match (a, b) {
         (Value::Object(old), Value::Object(new)) if same_class(a, b) => {
@@ -183,7 +200,8 @@ pub(crate) fn deeper_than(value: &Value, limit: usize) -> bool {
             | Value::DateTime(_)
             | Value::Date(_)
             | Value::Time(_)
-            | Value::TimeDelta(_) => {}
+            | Value::TimeDelta(_)
+            | Value::Leaf(_) => {}
         }
     }
 
@@ -276,10 +294,7 @@ fn grouped_diff(
             set_diff(path, old, new, depth, opts, memo)
         }
         _ => {
-            let key = crate::lcs::python_scalar_key;
-            let equal = !matches!(a, Value::Null)
-                && !matches!(b, Value::Null)
-                && key(a).is_some_and(|old| Some(old) == key(b));
+            let equal = grouped_scalars_equal(a, b, opts);
             scalar_diff(path, equal, a, b, depth, opts.max_depth)
         }
     }
@@ -307,5 +322,70 @@ fn lowered(value: &Value) -> Value {
             None => value.clone(),
         },
         _ => value.clone(),
+    }
+}
+
+/// Python `==` for two scalars of different types in one type group: numbers
+/// under the numeric options, `str` against ASCII `bytes` as `_diff_str`
+/// decodes them, `str` against a `UUID` under `ignore_uuid_types`.
+fn grouped_scalars_equal(a: &Value, b: &Value, opts: &DiffOptions) -> bool {
+    use crate::leaf::{Leaf, parse_uuid};
+    if opts.rounds_numbers()
+        && let (Some(x), Some(y)) = (as_number(a), as_number(b))
+    {
+        return numbers_match(&x, &y, opts);
+    }
+    // A rounded `complex` is a `complex` string no real number's matches.
+    let complex = |v: &Value| matches!(v, Value::Leaf(l) if matches!(&***l, Leaf::Complex(..)));
+    if opts.rounds_numbers() && (complex(a) || complex(b)) {
+        return false;
+    }
+    match (a, b) {
+        (Value::Null, _) | (_, Value::Null) => false,
+        (Value::Str(s), Value::Leaf(leaf)) | (Value::Leaf(leaf), Value::Str(s)) => match &***leaf {
+            Leaf::Bytes(bytes) => {
+                let fold = |b: &[u8]| {
+                    if opts.ignore_string_case {
+                        b.to_ascii_lowercase()
+                    } else {
+                        b.to_vec()
+                    }
+                };
+                bytes.is_ascii() && fold(bytes) == fold(s.as_bytes())
+            }
+            Leaf::Uuid(u) => s.as_utf8().and_then(parse_uuid) == Some(*u),
+            _ => false,
+        },
+        _ => {
+            let key = crate::lcs::python_scalar_key;
+            key(a).is_some_and(|old| Some(old) == key(b))
+        }
+    }
+}
+
+/// `value` as a [`Number`] the numeric options round: an int, a float, or a
+/// `Decimal` by its nearest `f64`.
+fn as_number(value: &Value) -> Option<crate::value::Number> {
+    use crate::leaf::Leaf;
+    use crate::value::Number;
+    match value {
+        Value::Number(n) => Some(n.clone()),
+        Value::Leaf(leaf) => match &***leaf {
+            Leaf::Decimal(d) => Some(Number::from_f64(d.approx())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `use_enum_value`'s pair: each `Enum` member replaced by its `value`, `None` with no member.
+fn enum_values<'a>(a: &'a Value, b: &'a Value) -> Option<(&'a Value, &'a Value)> {
+    let value = |v: &'a Value| match v {
+        Value::Object(o) => o.enum_value(),
+        _ => None,
+    };
+    match (value(a), value(b)) {
+        (None, None) => None,
+        (x, y) => Some((x.unwrap_or(a), y.unwrap_or(b))),
     }
 }

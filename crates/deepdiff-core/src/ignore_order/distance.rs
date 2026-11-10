@@ -1,6 +1,7 @@
 //! Structural and numeric distance between two values (`DeepDiff`'s `_get_rough_distance`) and the
 //! length helpers it is built from; `super::pairing::compute_pairs` ranks candidate pairs by it.
 
+use crate::leaf::Leaf;
 use crate::value::{Number, Object, ObjectKey, ObjectKind, Value, same_class};
 
 use crate::datetime::DateTime;
@@ -86,6 +87,10 @@ fn distance_family(value: &Value) -> Option<DistanceFamily> {
         Value::Date(value) => Some(DistanceFamily::Date(value.ordinal() as f64)),
         Value::Time(value) => Some(DistanceFamily::Time(value.hash_seconds_of_day() as f64)),
         Value::TimeDelta(value) => Some(DistanceFamily::TimeDelta(value.total_seconds())),
+        Value::Leaf(leaf) => match &***leaf {
+            Leaf::Decimal(d) => Some(DistanceFamily::Number(d.approx())),
+            Leaf::Bytes(_) | Leaf::Uuid(_) | Leaf::Complex(..) => None,
+        },
         Value::Null
         | Value::Str(_)
         | Value::Array(_)
@@ -155,7 +160,8 @@ pub(crate) fn rough_length(value: &Value) -> usize {
         | Value::DateTime(_)
         | Value::Date(_)
         | Value::Time(_)
-        | Value::TimeDelta(_) => 1,
+        | Value::TimeDelta(_)
+        | Value::Leaf(_) => 1,
         Value::Array(items) | Value::Tuple(items) => {
             1 + items.iter().map(rough_length).sum::<usize>()
         }
@@ -185,7 +191,8 @@ pub(crate) fn item_length(value: &Value) -> usize {
         | Value::DateTime(_)
         | Value::Date(_)
         | Value::Time(_)
-        | Value::TimeDelta(_) => 1,
+        | Value::TimeDelta(_)
+        | Value::Leaf(_) => 1,
         Value::Array(items) | Value::Tuple(items) => items.iter().map(item_length).sum(),
         Value::Set(items) | Value::FrozenSet(items) => items.iter().map(item_length).sum(),
         // A custom object counts its attribute keys, never their values.
@@ -401,7 +408,8 @@ fn coerce_for_type_change(old_value: &Value, new_value: &Value) -> Option<Value>
         | Value::Tuple(_)
         | Value::Set(_)
         | Value::FrozenSet(_)
-        | Value::Object(_) => None,
+        | Value::Object(_)
+        | Value::Leaf(_) => None,
     }
 }
 
@@ -425,6 +433,12 @@ fn is_truthy(value: &Value) -> bool {
         Value::Array(items) | Value::Tuple(items) => !items.is_empty(),
         Value::Set(items) | Value::FrozenSet(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
+        Value::Leaf(leaf) => match &***leaf {
+            Leaf::Bytes(b) => !b.is_empty(),
+            Leaf::Decimal(d) => d.approx() != 0.0,
+            Leaf::Uuid(_) => true,
+            Leaf::Complex(re, im) => *re != 0.0 || *im != 0.0,
+        },
     }
 }
 
@@ -443,6 +457,10 @@ fn coerce_to_f64(value: &Value) -> Option<f64> {
         | Value::Object(_) => None,
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         Value::Number(n) => n.as_f64(),
+        Value::Leaf(leaf) => match &***leaf {
+            Leaf::Decimal(d) => Some(d.approx()),
+            Leaf::Bytes(_) | Leaf::Uuid(_) | Leaf::Complex(..) => None,
+        },
         // A `Str::Wtf8` (a lone surrogate present) is never a valid float
         // literal, matching `float("\udc80")` raising in real Python.
         Value::Str(s) => s.as_utf8().and_then(|s| s.trim().parse::<f64>().ok()),
@@ -476,7 +494,8 @@ fn coerce_to_i64(value: &Value) -> Option<i64> {
         | Value::Tuple(_)
         | Value::Set(_)
         | Value::FrozenSet(_)
-        | Value::Object(_) => None,
+        | Value::Object(_)
+        | Value::Leaf(_) => None,
         Value::Bool(b) => Some(i64::from(*b)),
         Value::Number(n) => {
             if n.is_f64() {
@@ -510,6 +529,11 @@ fn coerce_to_python_str(value: &Value) -> Option<String> {
         Value::Date(value) => Some(value.python_str()),
         Value::Time(value) => Some(value.python_str()),
         Value::TimeDelta(value) => Some(value.python_str()),
+        Value::Leaf(leaf) => Some(match &***leaf {
+            Leaf::Decimal(d) => d.text().to_owned(),
+            Leaf::Uuid(u) => crate::leaf::uuid_string(*u),
+            other => crate::path::leaf_repr(other),
+        }),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)

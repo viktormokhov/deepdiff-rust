@@ -10,8 +10,9 @@
 //! objects runs on the calling thread instead, so it must itself be iterative.
 
 use deepdiff_core::diff::Resolver;
+use deepdiff_core::leaf::Leaf;
 use deepdiff_core::path::PathSegment;
-use deepdiff_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
+use deepdiff_core::{DEFAULT_MAX_DEPTH, DiffOptions, Number, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
@@ -179,6 +180,8 @@ fn needs_written_number(value: &Value) -> bool {
         | Value::Date(_)
         | Value::Time(_)
         | Value::TimeDelta(_) => false,
+        // Written by hand: an integral `Decimal` keeps every digit.
+        Value::Leaf(leaf) => matches!(&***leaf, Leaf::Decimal(_)),
     }
 }
 
@@ -226,6 +229,13 @@ fn write_json(value: &Value, out: &mut String) {
             }
             out.push('}');
         }
+        Value::Leaf(leaf) => match &***leaf {
+            Leaf::Decimal(d) if d.is_integral_text() => out.push_str(d.text()),
+            Leaf::Decimal(d) => write_json(&Value::Number(Number::from_f64(d.approx())), out),
+            _ => out.push_str(
+                &serde_json::to_string(&leaf.to_serde_json()).expect("a leaf's JSON serializes"),
+            ),
+        },
         Value::Null
         | Value::Bool(_)
         | Value::DateTime(_)

@@ -288,8 +288,8 @@ def test_a_set_holding_an_unhashable_subclass_is_refused() -> None:
 
 def test_an_unsupported_type_under_a_set_member_reports_no_fabricated_index() -> None:
     """A set member has no subscript, so nothing beneath one is reported as `[0]`."""
-    with pytest.raises(TypeError, match=r"complex at root\['a'\]\[<set member>\]\[1\]"):
-        DeepDiff({"a": {(1, 1j)}}, {"a": {1}})
+    with pytest.raises(TypeError, match=r"range at root\['a'\]\[<set member>\]\[1\]"):
+        DeepDiff({"a": {(1, range(1))}}, {"a": {1}})
 
 
 def test_a_set_subclass_is_accepted_and_compares_as_a_set() -> None:

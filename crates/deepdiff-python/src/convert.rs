@@ -11,6 +11,7 @@ use std::sync::Arc;
 use deepdiff_core::datetime::{
     Date as CDate, DateTime as CDateTime, Time as CTime, TimeDelta as CTimeDelta,
 };
+use deepdiff_core::leaf::{Decimal, Leaf};
 use deepdiff_core::path::{PathSegment, entry_path_segment, render_path};
 use deepdiff_core::value::rendered;
 use deepdiff_core::value::{
@@ -297,6 +298,14 @@ fn classify<'py>(
         });
     }
 
+    if let Some(leaf) = classify_leaf(current)? {
+        let class = (type_name(current) != leaf.type_name()).then(|| class_name(current, held));
+        return Ok(Step::Done(CValue::Leaf(Typed::with_class_name(
+            Box::new(leaf),
+            class,
+        ))));
+    }
+
     if set_member {
         return Err(unhashable_member_error(current, path));
     }
@@ -577,6 +586,7 @@ fn object_step<'py>(
     let mut class = Box::new(py_class(obj, lengths, held));
     class.class_attributes = class_attributes;
     class.instance = Some(obj.as_ptr() as usize);
+    class.is_enum = matches!(strategy, Strategy::Enum);
     held.objects.push(obj.clone().unbind());
     let mut iter = attrs.iter();
     Ok(match next_dict_entry(&mut iter, path, builder)? {
@@ -1016,14 +1026,20 @@ fn finish_object(
         }
         ObjectKind::CustomObject | ObjectKind::Opaque | ObjectKind::Cycle => {
             let class = class.expect("a custom object always carries its class");
-            builder.custom_object(
+            let mut object = builder.custom_object(
                 built,
                 class.name,
                 class.identity,
                 class.lengths,
                 class.class_attributes,
                 class.instance,
-            )
+            );
+            if let CValue::Object(o) = &mut object
+                && class.is_enum
+            {
+                o.mark_enum();
+            }
+            object
         }
     }
 }
@@ -1330,6 +1346,10 @@ fn classify_key_scalar(obj: &Bound<'_, PyAny>, dict_path: &[PathSegment]) -> PyR
 
     if obj.cast::<PyDate>().is_ok() {
         return Ok(CValue::Date(date_fields(obj, dict_path)?.into()));
+    }
+
+    if let Some(leaf) = classify_leaf(obj)? {
+        return Ok(CValue::Leaf(Typed::new(Box::new(leaf))));
     }
 
     Err(PyTypeError::new_err(format!(
@@ -1688,6 +1708,7 @@ struct PyClass {
     lengths: ObjectLengths,
     class_attributes: Vec<Arc<str>>,
     instance: Option<usize>,
+    is_enum: bool,
 }
 
 /// The [`PyClass`] of `obj`'s type, identified by the type object's address;
@@ -1702,6 +1723,7 @@ fn py_class(obj: &Bound<'_, PyAny>, lengths: ObjectLengths, held: &mut Held) -> 
         lengths,
         class_attributes: Vec::new(),
         instance: None,
+        is_enum: false,
     }
 }
 
@@ -1765,6 +1787,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 CValue::TimeDelta(value) => {
                     RenderStep::Done(timedelta_to_pyobject(py, value.value())?)
                 }
+                CValue::Leaf(leaf) => RenderStep::Done(leaf_to_pyobject(py, leaf)?),
                 CValue::Array(items) => {
                     start_sequence(py, SeqKind::List, items, &mut stack, &mut pending)?
                 }
@@ -2003,4 +2026,37 @@ pub(crate) fn objects_by_identity<'v>(values: &[&'v CValue]) -> HashMap<String, 
         }
     }
     index
+}
+
+/// A `bytes`, `complex`, `decimal.Decimal` or `uuid.UUID` (a subclass
+/// included) as a [`Leaf`], else `None`.
+fn classify_leaf(obj: &Bound<'_, PyAny>) -> PyResult<Option<Leaf>> {
+    Ok(Some(if let Ok(b) = obj.cast::<PyBytes>() {
+        Leaf::Bytes(b.as_bytes().into())
+    } else if let Ok(c) = obj.cast::<PyComplex>() {
+        Leaf::Complex(c.real(), c.imag())
+    } else if is_loaded_instance(obj, "decimal", "Decimal")? {
+        Leaf::Decimal(Box::new(Decimal::new(&obj.str()?.to_cow()?)))
+    } else if is_loaded_instance(obj, "uuid", "UUID")? {
+        Leaf::Uuid(obj.getattr("int")?.extract()?)
+    } else {
+        return Ok(None);
+    }))
+}
+
+/// Rebuilds a [`Leaf`] as its plain base type.
+fn leaf_to_pyobject(py: Python<'_>, leaf: &Leaf) -> PyResult<Py<PyAny>> {
+    match leaf {
+        Leaf::Bytes(b) => PyBytes::new(py, b).into_py_any(py),
+        Leaf::Complex(re, im) => PyComplex::from_doubles(py, *re, *im).into_py_any(py),
+        Leaf::Decimal(d) => {
+            let class = py.import("decimal")?.getattr("Decimal")?;
+            class.call1((d.text(),))?.into_py_any(py)
+        }
+        Leaf::Uuid(u) => {
+            let kwargs = [("int", *u)].into_py_dict(py)?;
+            let class = py.import("uuid")?.getattr("UUID")?;
+            class.call((), Some(&kwargs))?.into_py_any(py)
+        }
+    }
 }

@@ -4,7 +4,8 @@
 //! arrays.
 
 use crate::datetime::DateTime;
-use crate::value::{Number, Value, class_name};
+use crate::leaf::Leaf;
+use crate::value::{Number, Typed, Value, class_name};
 
 use crate::error::Error;
 use crate::path::{PathSegment, render_path};
@@ -30,6 +31,7 @@ pub(crate) fn python_type_name(value: &Value) -> &'static str {
         Value::Set(_) => "set",
         Value::FrozenSet(_) => "frozenset",
         Value::Object(_) => "dict",
+        Value::Leaf(leaf) => leaf.type_name(),
     }
 }
 
@@ -207,5 +209,54 @@ fn floats_equal(a: f64, b: f64) -> bool {
     )]
     {
         a == b
+    }
+}
+/// `_diff_str`, `_diff_numbers` or `_diff_uuids` for two [`Leaf`]s of one
+/// kind. Off [`super::diff_at`]'s frame, which bounds `max_depth`.
+///
+/// ponytail: a `Decimal` or `complex` rounds through `f64` under the numeric
+/// options, so digits past ~15 are lost there; port `Decimal.quantize` if
+/// that matters.
+#[inline(never)]
+pub(crate) fn leaf_diff(
+    path: &[PathSegment],
+    a: &Value,
+    b: &Value,
+    depth: usize,
+    opts: &DiffOptions,
+) -> Result<Report, Error> {
+    let (Value::Leaf(old), Value::Leaf(new)) = (a, b) else {
+        unreachable!("leaf_diff is only called on two leaves");
+    };
+    let float = Number::from_f64;
+    let rounds = opts.rounds_numbers();
+    let equal = match (&***old, &***new) {
+        (Leaf::Bytes(_), Leaf::Bytes(_)) if opts.ignore_string_case => {
+            let (a, b) = (lowered_bytes(a), lowered_bytes(b));
+            return scalar_diff(path, a == b, &a, &b, depth, opts.max_depth);
+        }
+        (Leaf::Decimal(x), Leaf::Decimal(y)) if rounds => {
+            numbers_match(&float(x.approx()), &float(y.approx()), opts)
+        }
+        (Leaf::Complex(xr, xi), Leaf::Complex(yr, yi)) if rounds => {
+            numbers_match(&float(*xr), &float(*yr), opts)
+                && numbers_match(&float(*xi), &float(*yi), opts)
+        }
+        (x, y) => x == y,
+    };
+    scalar_diff(path, equal, a, b, depth, opts.max_depth)
+}
+
+/// A `bytes` leaf `bytes.lower()`ed, keeping its class name.
+fn lowered_bytes(value: &Value) -> Value {
+    match value {
+        Value::Leaf(leaf) => match &***leaf {
+            Leaf::Bytes(b) => Value::Leaf(Typed::with_class_name(
+                Box::new(Leaf::Bytes(b.to_ascii_lowercase().into())),
+                leaf.class_name().map(Into::into),
+            )),
+            _ => value.clone(),
+        },
+        _ => value.clone(),
     }
 }

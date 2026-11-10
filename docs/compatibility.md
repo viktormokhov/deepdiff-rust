@@ -26,7 +26,10 @@ Implemented, checked against `deepdiff==9.1.0`:
   `use_log_scale`, `log_scale_similarity_threshold`, `ignore_nan_inequality`,
   `ignore_string_case`, `ignore_numeric_type_changes`,
   `ignore_string_type_changes`, `ignore_type_in_groups`,
-  `ignore_type_subclasses`, `truncate_datetime` (datetimes).
+  `ignore_type_subclasses`, `truncate_datetime` (datetimes),
+  `ignore_uuid_types`, `use_enum_value`.
+- `bytes`, `decimal.Decimal`, `uuid.UUID` and `complex` values, keys and
+  set members, under the numeric and string options above.
 
 Known divergences: report key order follows sorted paths, not traversal
 order; `affected_paths` and `affected_root_keys` are plain `set`s.
@@ -38,12 +41,17 @@ object's `__` attributes.
 `ignore_string_case` and `ignore_numeric_type_changes` do not fold dict
 keys; `truncate_datetime` leaves `time` values alone (DeepDiff reports
 them as seconds); the numpy members of DeepDiff's `numbers` group are left
-out.
+out. A reported `Enum` or custom object renders as a dict of its attributes,
+and an `IntEnum` diffs as a plain `int`. `bytes` dict keys (DeepDiff
+crashes) and `UUID` dict keys (DeepDiff reports path `None`) get normal
+paths. A `Decimal` rounds through its nearest `float` under
+`significant_digits` and `math_epsilon`.
 
 Onix implements a useful subset of DeepDiff's core comparison API and converts
 supported live Python objects directly into its native value model. Its documented
 scope includes `None`, booleans, integers, floats, strings, dictionaries,
-lists, tuples, sets, frozensets, Python date/time types, and many custom
+lists, tuples, sets, frozensets, `bytes`, `Decimal`, `UUID`, `complex`,
+Python date/time types, enums, and many custom
 objects by attributes. Unsupported types raise errors rather than being
 silently coerced.
 

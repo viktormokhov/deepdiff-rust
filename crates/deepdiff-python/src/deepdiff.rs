@@ -41,7 +41,7 @@ pub(crate) struct DeepDiff {
 #[pymethods]
 impl DeepDiff {
     #[new]
-    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None, exclude_types=None, ignore_private_variables=true, skip=None, significant_digits=None, exponent_notation=false, math_epsilon=None, log_scale_threshold=None, ignore_nan_inequality=false, ignore_string_case=false, ignore_numeric_type_changes=false, type_groups=None, group_mask=None, truncate_datetime=None))]
+    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None, exclude_types=None, ignore_private_variables=true, skip=None, significant_digits=None, exponent_notation=false, math_epsilon=None, log_scale_threshold=None, ignore_nan_inequality=false, ignore_string_case=false, ignore_numeric_type_changes=false, type_groups=None, group_mask=None, truncate_datetime=None, use_enum_value=false))]
     #[allow(clippy::too_many_arguments)] // mirrors the Python keyword signature
     fn new(
         py: Python<'_>,
@@ -62,6 +62,7 @@ impl DeepDiff {
         type_groups: Option<HashMap<String, u64>>,
         group_mask: Option<Py<PyAny>>,
         truncate_datetime: Option<Py<PyDict>>,
+        use_enum_value: bool,
     ) -> PyResult<Self> {
         let mut opts = DiffOptions {
             significant_digits,
@@ -71,6 +72,7 @@ impl DeepDiff {
             ignore_nan_inequality,
             ignore_string_case,
             ignore_numeric_type_changes,
+            use_enum_value,
             ..resolve_options(max_depth, ignore_order)?
         };
         let mut held = Held::new(opts.max_depth);

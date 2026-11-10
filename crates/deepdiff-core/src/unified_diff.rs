@@ -23,13 +23,18 @@ const CONTEXT_LINES: usize = 3;
 /// none (see the module doc). Also `None` when either side holds a lone surrogate (`Str::Wtf8`),
 /// which line-splitting cannot read; the `values_changed` entry itself is unaffected.
 pub(crate) fn str_diff_field(a: &Value, b: &Value) -> Option<String> {
-    match (a, b) {
-        (Value::Str(t1), Value::Str(t2)) => match (t1.as_utf8(), t2.as_utf8()) {
-            (Some(t1), Some(t2)) => str_diff(t1, t2),
+    /// `_diff_str` reads `bytes` as ASCII text.
+    fn text(value: &Value) -> Option<&str> {
+        match value {
+            Value::Str(s) => s.as_utf8(),
+            Value::Leaf(leaf) => match &***leaf {
+                crate::leaf::Leaf::Bytes(b) if b.is_ascii() => std::str::from_utf8(b).ok(),
+                _ => None,
+            },
             _ => None,
-        },
-        _ => None,
+        }
     }
+    str_diff(text(a)?, text(b)?)
 }
 
 /// The `diff` string for two changed strings, or `None` when no field is warranted.

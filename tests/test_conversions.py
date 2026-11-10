@@ -288,10 +288,10 @@ def test_to_dict_returns_the_original_non_str_key_object_in_a_nested_value() -> 
     assert isinstance(key, int) and not isinstance(key, bool)
 
 
-def test_complex_dict_key_raises_type_error() -> None:
+def test_fraction_dict_key_raises_type_error() -> None:
     """A dict key of a type outside the accepted set raises TypeError naming it."""
-    with pytest.raises(TypeError, match="complex"):
-        DeepDiff({complex(1, 2): "a"}, {})
+    with pytest.raises(TypeError, match="Fraction"):
+        DeepDiff({fractions.Fraction(1, 2): "a"}, {})
 
 
 def test_tuple_dict_key_containing_a_nested_tuple_is_rejected() -> None:
@@ -590,8 +590,9 @@ def test_a_custom_object_nested_in_a_dict_reports_its_attribute_path() -> None:
 def test_unsupported_dict_key_error_reports_path_to_the_dict() -> None:
     """An unsupported dict key error reports the path to the dict containing it, not just the
     key's type — the key itself has no path segment of its own to report."""
-    with pytest.raises(TypeError, match=r"complex at root\['a'\]"):
-        DeepDiff({"a": {complex(1, 2): "x"}}, {"a": {complex(1, 2): "y"}})
+    key = fractions.Fraction(1, 2)
+    with pytest.raises(TypeError, match=r"Fraction at root\['a'\]"):
+        DeepDiff({"a": {key: "x"}}, {"a": {key: "y"}})
 
 
 # Lone (unpaired) surrogates: tests/golden/README.md,
@@ -750,25 +751,21 @@ class _Color(_enum.Enum):
 @pytest.mark.parametrize(
     "value_factory",
     [
-        lambda: b"hello",
         lambda: bytearray(b"hi"),
         lambda: range(3),
-        lambda: 1 + 2j,
         object,
         lambda: memoryview(b"a"),
         lambda: _io.BytesIO(b"a"),
         lambda: _array.array("i", [1]),
         lambda: collections.deque([1]),
-        lambda: decimal.Decimal("1.5"),
         lambda: fractions.Fraction(1, 2),
-        lambda: uuid.UUID(int=1),
         lambda: ipaddress.ip_address("1.1.1.1"),
         lambda: _IterOnly([1, 2]),
         lambda: int,  # a class object
     ],
     ids=[
-        "bytes", "bytearray", "range", "complex", "object", "memoryview",
-        "BytesIO", "array", "deque", "decimal", "fraction", "uuid",
+        "bytearray", "range", "object", "memoryview",
+        "BytesIO", "array", "deque", "fraction",
         "ipaddress", "iter_only", "class_object",
     ],
 )
@@ -785,8 +782,7 @@ def test_types_deepdiff_routes_elsewhere_raise_rather_than_reporting_empty(value
 
 def test_bytes_does_not_silently_compare_equal() -> None:
     """Two different bytes must not report {} (a false negative)."""
-    with pytest.raises(TypeError):
-        DeepDiff(b"hello", b"world")
+    assert DeepDiff(b"hello", b"world") == RealDeepDiff(b"hello", b"world", verbose_level=2)
 
 
 def test_a_dict_subclass_and_a_same_named_object_are_a_type_change_like_deepdiff() -> None:
@@ -1163,8 +1159,9 @@ def test_the_same_unsupported_object_on_both_sides_reports_nothing_like_deepdiff
 @pytest.mark.parametrize("ignore_order", [False, True])
 def test_different_unsupported_objects_raise_with_the_path(ignore_order: bool) -> None:
     """Two different unsupported objects at one position raise the path-naming TypeError, never {}."""
-    with pytest.raises(TypeError, match=r"Decimal at root\[0\]\['k'\]"):
-        DeepDiff([{"k": decimal.Decimal("1")}], [{"k": decimal.Decimal("1")}], ignore_order=ignore_order)
+    a, b = [{"k": fractions.Fraction(1)}], [{"k": fractions.Fraction(1)}]
+    with pytest.raises(TypeError, match=r"Fraction at root\[0\]\['k'\]"):
+        DeepDiff(a, b, ignore_order=ignore_order)
 
 
 @pytest.mark.parametrize(
@@ -1312,11 +1309,12 @@ def test_an_unsupported_instance_attribute_in_a_reported_object_is_refused_with_
     """An instance attribute onix does not convert is refused wherever a report would show it."""
 
     class Priced:
-        def __init__(self, price: decimal.Decimal) -> None:
+        def __init__(self, price: fractions.Fraction) -> None:
             self.price = price
 
-    with pytest.raises(TypeError, match=r"Decimal at root\[1\]\.price"):
-        DeepDiff([Priced(decimal.Decimal(1))], [Priced(decimal.Decimal(1)), Priced(decimal.Decimal(2))])
+    one, two = fractions.Fraction(1), fractions.Fraction(2)
+    with pytest.raises(TypeError, match=r"Fraction at root\[1\]\.price"):
+        DeepDiff([Priced(one)], [Priced(one), Priced(two)])
 
 
 class _Item:
@@ -1717,12 +1715,14 @@ def test_a_shared_unreadable_object_inside_compared_objects_is_skipped() -> None
     _same_structure(_Wrap(shared, 1), _Wrap(shared, 2))
 
 
-@pytest.mark.parametrize("keys", [[(1, 2j), "x"], ["x", (1, 2j)]], ids=["bad_key_first", "bad_key_last"])
+@pytest.mark.parametrize(
+    "keys", [[(1, range(1)), "x"], ["x", (1, range(1))]], ids=["bad_key_first", "bad_key_last"],
+)
 def test_an_unsupported_dict_key_inside_an_object_is_lazy_in_either_key_order(keys: list) -> None:
     """An unsupported key raises only where its object is compared, whichever position it holds."""
     holder = _Wrap({key: 1 for key in keys}, 0)
     _same_structure({"h": holder, "n": 1}, {"h": holder, "n": 2})
-    with pytest.raises(TypeError, match="unsupported type for a dict key: complex"):
+    with pytest.raises(TypeError, match="unsupported type for a dict key: range"):
         DeepDiff({"h": _Wrap({key: 1 for key in keys}, 0)}, {"h": _Wrap({key: 1 for key in keys}, 0)})
 
 

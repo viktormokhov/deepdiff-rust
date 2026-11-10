@@ -47,6 +47,8 @@ pub struct DiffOptions {
     /// `ignore_type_in_groups`: each class name's bitmask of the groups it
     /// is in; values sharing a bit never report `type_changes`.
     pub type_groups: Option<Arc<HashMap<Box<str>, u64>>>,
+    /// `use_enum_value`: an `Enum` member compares as its `value` against anything else.
+    pub use_enum_value: bool,
 }
 
 impl Default for DiffOptions {
@@ -62,6 +64,7 @@ impl Default for DiffOptions {
             ignore_string_case: false,
             ignore_numeric_type_changes: false,
             type_groups: None,
+            use_enum_value: false,
         }
     }
 }
@@ -77,6 +80,13 @@ impl DiffOptions {
         })
     }
 
+    /// Whether `significant_digits`, `math_epsilon` or `use_log_scale` rounds numbers.
+    pub(crate) fn rounds_numbers(&self) -> bool {
+        self.significant_digits.is_some()
+            || self.math_epsilon.is_some()
+            || self.log_scale_threshold.is_some()
+    }
+
     /// Whether a pair the plain rules call unequal may still compare equal.
     pub(crate) fn normalizes(&self) -> bool {
         self.significant_digits.is_some()
@@ -85,6 +95,7 @@ impl DiffOptions {
             || self.ignore_nan_inequality
             || self.ignore_string_case
             || self.type_groups.is_some()
+            || self.use_enum_value
     }
 }
 

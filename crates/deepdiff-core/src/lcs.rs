@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive};
 
-use crate::value::Value;
+use crate::leaf::Leaf;
+use crate::value::{Number, Value, fold_signed_zero};
 
 /// Bucket key for elements equal under Python's `==`, not [`mod@crate::diff`]'s scalar comparison:
 /// `1`, `1.0` and `True` share [`ScalarKey::Int`], so `difflib` matches them and reports no
@@ -43,6 +44,12 @@ pub(crate) enum ScalarKey {
         instant: i64,
     },
     TimeDelta(crate::datetime::TimeDelta),
+    Bytes(Vec<u8>),
+    /// A `Decimal` no int or float equals, by [`crate::leaf::Decimal`]'s key.
+    Decimal(Box<str>),
+    Uuid(u128),
+    /// A `complex` with a nonzero imaginary part, by both parts' bits.
+    Complex(u64, u64),
 }
 
 /// Avalanches a float's bit pattern before hashing: integral and half-integer floats share about
@@ -72,6 +79,10 @@ impl std::hash::Hash for ScalarKey {
             }
             Self::Date(ordinal) => ordinal.hash(state),
             Self::TimeDelta(value) => value.hash(state),
+            Self::Bytes(b) => b.hash(state),
+            Self::Decimal(key) => key.hash(state),
+            Self::Uuid(u) => u.hash(state),
+            Self::Complex(re, im) => (mix_float_bits(*re), *im).hash(state),
         }
     }
 }
@@ -96,6 +107,7 @@ pub(crate) fn all_basic_scalars(items: &[Value]) -> bool {
                 | Value::Date(_)
                 | Value::Time(_)
                 | Value::TimeDelta(_)
+                | Value::Leaf(_)
         )
     })
 }
@@ -156,11 +168,36 @@ pub(crate) fn python_scalar_key(value: &Value) -> Option<ScalarKey> {
             instant: value.sort_instant(),
         },
         Value::TimeDelta(value) => ScalarKey::TimeDelta(value.value()),
+        Value::Leaf(leaf) => return leaf_scalar_key(value, leaf),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)
         | Value::FrozenSet(_)
         | Value::Object(_) => return None,
+    })
+}
+
+/// [`python_scalar_key`] for a [`Leaf`]: a `Decimal` or `complex` equal to an
+/// int or float shares that number's key, as Python `==` does.
+fn leaf_scalar_key(value: &Value, leaf: &Leaf) -> Option<ScalarKey> {
+    let number = |n: Number| python_scalar_key(&Value::Number(n));
+    let bits = |f: f64| fold_signed_zero(f).to_bits();
+    Some(match leaf {
+        Leaf::Bytes(b) => ScalarKey::Bytes(b.to_vec()),
+        Leaf::Uuid(u) => ScalarKey::Uuid(*u),
+        Leaf::Complex(re, im) if *im == 0.0 => return number(Number::from_f64(*re)),
+        Leaf::Complex(re, im) => ScalarKey::Complex(bits(*re), bits(*im)),
+        Leaf::Decimal(d) => {
+            let exact = || crate::leaf::float_decimal_key(d.approx());
+            match (d.key(), d.integer()) {
+                (None, _) => ScalarKey::Nan(std::ptr::from_ref(value) as usize),
+                (_, Some(i)) => return number(Number::from_bigint(i)),
+                (Some(key), None) if exact().as_deref() == Some(key) => {
+                    return number(Number::from_f64(d.approx()));
+                }
+                (Some(key), None) => ScalarKey::Decimal(key.into()),
+            }
+        }
     })
 }
 

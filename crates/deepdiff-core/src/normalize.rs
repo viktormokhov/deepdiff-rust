@@ -131,11 +131,16 @@ pub(crate) fn fold_case(s: &Str, fold: bool) -> Cow<'_, [u8]> {
 
 /// What `DeepHash` normalizes in a leaf before hashing it.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "one flag per DeepDiff option"
+)]
 pub(crate) struct HashNorm {
     pub(crate) significant_digits: Option<usize>,
     pub(crate) exponent_notation: bool,
     pub(crate) ignore_numeric_type_changes: bool,
     pub(crate) ignore_string_case: bool,
+    pub(crate) use_enum_value: bool,
 }
 
 impl HashNorm {
@@ -145,6 +150,7 @@ impl HashNorm {
             exponent_notation: opts.exponent_notation,
             ignore_numeric_type_changes: opts.ignore_numeric_type_changes,
             ignore_string_case: opts.ignore_string_case,
+            use_enum_value: opts.use_enum_value,
         }
     }
 }

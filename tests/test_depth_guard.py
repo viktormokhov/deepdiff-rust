@@ -366,7 +366,7 @@ def test_cross_arg_error_drops_deep_first_arg_without_crashing() -> None:
             return v
         t1 = deep({MAX_DEPTH_CEILING} - 1)
         try:
-            DeepDiff(t1, {{"x": {{1j}}}}, max_depth={MAX_DEPTH_CEILING})
+            DeepDiff(t1, {{"x": {{range(1)}}}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
             print("OK")
         else:
@@ -386,7 +386,7 @@ def test_intra_arg_error_after_deep_sibling_does_not_crash() -> None:
             for _ in range(d):
                 v = {{"a": v, "b": 2}}
             return v
-        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": {{1j}}}}
+        t1 = {{"deep": deep({MAX_DEPTH_CEILING} - 1), "bad": {{range(1)}}}}
         try:
             DeepDiff(t1, {{}}, max_depth={MAX_DEPTH_CEILING})
         except TypeError:
@@ -413,7 +413,7 @@ def test_cross_arg_error_from_small_stack_thread_does_not_crash() -> None:
         # recursive container code would overflow a 512 KiB stack); the small-stack
         # thread runs only the DeepDiff call, with t1 kept alive until it joins.
         t1 = deep({MAX_DEPTH_CEILING} - 1)
-        bad = {{"x": {{1j}}}}
+        bad = {{"x": {{range(1)}}}}
         outcome = []
         def work():
             try:

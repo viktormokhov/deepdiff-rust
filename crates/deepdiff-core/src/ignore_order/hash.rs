@@ -10,7 +10,8 @@ use std::rc::Rc;
 use num_bigint::BigInt;
 
 use crate::lcs::{ScalarKey, mix_float_bits, python_scalar_key};
-use crate::value::{ObjectKind, Value};
+use crate::leaf::Leaf;
+use crate::value::{Number, ObjectKind, Value, fold_signed_zero};
 
 use super::IgnoreOrderMemo;
 use super::fxhash::HashMap;
@@ -77,6 +78,16 @@ fn hash_value<H: Hasher>(root: &Value, state: &mut H) {
                 time.sort_instant().hash(state);
             }
             Value::TimeDelta(value) => value.hash(state),
+            // Consistent with `Leaf`'s `PartialEq`: a decimal by its value key.
+            Value::Leaf(leaf) => match &***leaf {
+                Leaf::Bytes(b) => b.hash(state),
+                Leaf::Decimal(d) => d.key().hash(state),
+                Leaf::Uuid(u) => u.hash(state),
+                Leaf::Complex(re, im) => {
+                    fold_signed_zero(*re).to_bits().hash(state);
+                    fold_signed_zero(*im).to_bits().hash(state);
+                }
+            },
             Value::Array(items) | Value::Tuple(items) => {
                 items.len().hash(state);
                 stack.extend(items.iter());
@@ -155,7 +166,18 @@ pub(crate) enum ItemKey {
     Opaque(Box<str>),
     /// A number by its `significant_digits` string, type-tagged (float or
     /// not) unless `ignore_numeric_type_changes`.
-    Rounded(Option<bool>, Box<str>),
+    Rounded(Option<&'static str>, Box<str>),
+    /// A `bytes`, `Decimal` (by `str()`, as `DeepHash` digests it), `UUID` or `complex`.
+    Leaf(LeafKey),
+}
+
+/// [`ItemKey::Leaf`]'s payload.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum LeafKey {
+    Bytes(Vec<u8>),
+    Decimal(Box<str>),
+    Uuid(u128),
+    Complex(u64, u64),
 }
 
 /// Hand-written so the `Float` arm runs through [`mix_float_bits`]; every other arm hashes as
@@ -186,6 +208,7 @@ impl std::hash::Hash for ItemKey {
                 class.hash(state);
                 map.hash(state);
             }
+            Self::Leaf(key) => key.hash(state),
         }
     }
 }
@@ -336,7 +359,8 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> RepId {
             | Value::DateTime(_)
             | Value::Date(_)
             | Value::Time(_)
-            | Value::TimeDelta(_) => {}
+            | Value::TimeDelta(_)
+            | Value::Leaf(_) => {}
         }
     }
 
@@ -353,7 +377,8 @@ pub(crate) fn set_member_digest(root: &Value, memo: &IgnoreOrderMemo) -> RepId {
             | Value::DateTime(_)
             | Value::Date(_)
             | Value::Time(_)
-            | Value::TimeDelta(_) => {
+            | Value::TimeDelta(_)
+            | Value::Leaf(_) => {
                 let rep =
                     memo.content_rep(MemberContent::Scalar(scalar_content_key(value, memo.norm)));
                 let part = python_scalar_key(value)
@@ -462,6 +487,7 @@ fn scalar_content_key(value: &Value, norm: HashNorm) -> ItemKey {
         Value::Date(date) => ItemKey::Date(date.ordinal()),
         Value::Time(time) => ItemKey::Time(time.hash_seconds_of_day()),
         Value::TimeDelta(value) => ItemKey::TimeDelta(value.value()),
+        Value::Leaf(leaf) => leaf_key(leaf, norm),
         Value::Array(_)
         | Value::Tuple(_)
         | Value::Set(_)
@@ -503,11 +529,39 @@ fn number_key(n: &crate::value::Number) -> ItemKey {
 fn leaf_number_key(n: &crate::value::Number, norm: HashNorm) -> ItemKey {
     match norm.significant_digits {
         Some(digits) => ItemKey::Rounded(
-            (!norm.ignore_numeric_type_changes).then(|| n.is_f64()),
+            (!norm.ignore_numeric_type_changes).then(|| if n.is_f64() { "float" } else { "int" }),
             number_to_string(n, digits, norm.exponent_notation).into(),
         ),
         None => number_key(n),
     }
+}
+
+/// A [`Leaf`]'s key as `DeepHash` digests it: a `Decimal` or `complex` by
+/// its `significant_digits` string when set, `bytes` case-folded under
+/// `ignore_string_case`.
+///
+/// ponytail: `ignore_string_type_changes` does not key `bytes` with `str`
+/// here; add it to [`HashNorm`] if `ignore_order` needs that pairing.
+fn leaf_key(leaf: &Leaf, norm: HashNorm) -> ItemKey {
+    let tag = (!norm.ignore_numeric_type_changes).then(|| leaf.type_name());
+    let round =
+        |f: f64, digits| number_to_string(&Number::from_f64(f), digits, norm.exponent_notation);
+    let bits = |f: f64| fold_signed_zero(f).to_bits();
+    let key = match (leaf, norm.significant_digits) {
+        (Leaf::Decimal(d), Some(digits)) => {
+            return ItemKey::Rounded(tag, round(d.approx(), digits).into());
+        }
+        (Leaf::Complex(re, im), Some(digits)) => {
+            let text = format!("{}+{}j", round(*re, digits), round(*im, digits));
+            return ItemKey::Rounded(tag, text.into());
+        }
+        (Leaf::Bytes(b), _) if norm.ignore_string_case => LeafKey::Bytes(b.to_ascii_lowercase()),
+        (Leaf::Bytes(b), _) => LeafKey::Bytes(b.to_vec()),
+        (Leaf::Decimal(d), None) => LeafKey::Decimal(d.text().into()),
+        (Leaf::Uuid(u), _) => LeafKey::Uuid(*u),
+        (Leaf::Complex(re, im), None) => LeafKey::Complex(bits(*re), bits(*im)),
+    };
+    ItemKey::Leaf(key)
 }
 
 /// A string's key, case-folded under `ignore_string_case`.
@@ -542,6 +596,7 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
         Value::Time(value) => (ItemKey::Time(value.hash_seconds_of_day()), part()),
         Value::TimeDelta(value) => (ItemKey::TimeDelta(value.value()), part()),
         Value::Number(n) => (leaf_number_key(n, memo.norm), part()),
+        Value::Leaf(leaf) => (leaf_key(leaf, memo.norm), part()),
         Value::Array(items) => (
             ItemKey::List(items.iter().map(|i| item_key(i, memo)).collect()),
             None,
@@ -562,6 +617,11 @@ fn keyed(value: &Value, memo: &IgnoreOrderMemo, want_part: bool) -> (ItemKey, Op
                 .filter(|_| map.kind() == ObjectKind::Opaque)
             {
                 return (ItemKey::Opaque(Box::from(identity)), None);
+            }
+            if memo.norm.use_enum_value
+                && let Some(value) = map.enum_value()
+            {
+                return keyed(value, memo, want_part);
             }
             let attrs = map
                 .iter()

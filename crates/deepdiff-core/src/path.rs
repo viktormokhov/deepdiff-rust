@@ -182,6 +182,13 @@ pub fn set_item_repr(item: &Value) -> String {
         Value::Date(value) => value.python_str(),
         Value::Time(value) => value.python_str(),
         Value::TimeDelta(value) => value.python_str(),
+        // `str()`, a `bytes` quoted as a string is.
+        Value::Leaf(leaf) => match &***leaf {
+            crate::leaf::Leaf::Bytes(b) => format!("'{}'", bytes_repr(b)),
+            crate::leaf::Leaf::Decimal(d) => d.text().to_owned(),
+            crate::leaf::Leaf::Uuid(u) => crate::leaf::uuid_string(*u),
+            crate::leaf::Leaf::Complex(re, im) => complex_repr(*re, *im),
+        },
         other => python_repr(other),
     }
 }
@@ -282,6 +289,7 @@ fn write_repr_head<'a>(out: &mut String, stack: &mut Vec<Work<'a>>, value: &'a V
         }
         Value::Time(value) => out.push_str(&time_repr(value.value())),
         Value::TimeDelta(value) => out.push_str(&timedelta_repr(value.value())),
+        Value::Leaf(leaf) => out.push_str(&leaf_repr(leaf)),
         Value::Array(items) => push_sequence(out, stack, items, "[", "]"),
         Value::Tuple(items) => {
             let close = if items.len() == 1 { ",)" } else { ")" };
@@ -593,6 +601,62 @@ pub(crate) fn python_float_repr(value: f64) -> String {
 
     let (whole, fraction) = digits.split_at(decimal_point);
     format!("{sign}{whole}.{fraction}")
+}
+
+/// Python `repr()` for `bytes`: `'` quotes unless only `"` avoids escaping.
+fn bytes_repr(bytes: &[u8]) -> String {
+    let quote = if bytes.contains(&b'\'') && !bytes.contains(&b'"') {
+        b'"'
+    } else {
+        b'\''
+    };
+    let mut out = String::from("b");
+    out.push(char::from(quote));
+    for &b in bytes {
+        match b {
+            b'\\' => out.push_str("\\\\"),
+            b'\t' => out.push_str("\\t"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            _ if b == quote => {
+                out.push('\\');
+                out.push(char::from(b));
+            }
+            0x20..0x7f => out.push(char::from(b)),
+            _ => {
+                let _ = write!(out, "\\x{b:02x}");
+            }
+        }
+    }
+    out.push(char::from(quote));
+    out
+}
+
+/// Python `repr()` for a [`Leaf`](crate::leaf::Leaf).
+#[must_use]
+pub fn leaf_repr(leaf: &crate::leaf::Leaf) -> String {
+    use crate::leaf::Leaf;
+    match leaf {
+        Leaf::Bytes(b) => bytes_repr(b),
+        Leaf::Decimal(d) => format!("Decimal('{}')", d.text()),
+        Leaf::Uuid(u) => format!("UUID('{}')", crate::leaf::uuid_string(*u)),
+        Leaf::Complex(re, im) => complex_repr(*re, *im),
+    }
+}
+
+/// Python `repr()` for a `complex`: `1j`, or `(1+2j)` when the real part is
+/// nonzero or negative zero.
+pub(crate) fn complex_repr(re: f64, im: f64) -> String {
+    let part = |f: f64| {
+        let text = python_float_repr(f);
+        text.strip_suffix(".0").map_or(text.clone(), str::to_owned)
+    };
+    if re == 0.0 && re.is_sign_positive() {
+        return format!("{}j", part(im));
+    }
+    let imag = part(im);
+    let sign = if imag.starts_with('-') { "" } else { "+" };
+    format!("({}{sign}{imag}j)", part(re))
 }
 
 #[cfg(test)]

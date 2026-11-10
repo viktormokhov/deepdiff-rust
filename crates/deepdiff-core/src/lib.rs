@@ -12,6 +12,7 @@ pub mod diff;
 pub mod error;
 mod ignore_order;
 mod lcs;
+pub mod leaf;
 mod normalize;
 pub mod path;
 pub mod report;

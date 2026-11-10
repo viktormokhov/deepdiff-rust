@@ -42,6 +42,8 @@ class DeepDiff(dict[str, Any]):
         ignore_type_in_groups: Any = ...,
         ignore_type_subclasses: bool = ...,
         truncate_datetime: str | None = ...,
+        ignore_uuid_types: bool = ...,
+        use_enum_value: bool = ...,
     ) -> None: ...
     def to_dict(self, verbose_level: int | None = ...) -> dict[str, Any]:
         """The differences as a plain dict, with ``type_changes`` types as type objects."""

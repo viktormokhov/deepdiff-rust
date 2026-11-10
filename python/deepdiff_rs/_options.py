@@ -3,6 +3,7 @@
 import datetime
 import decimal
 import fractions
+import uuid
 
 # deepdiff's `numbers` and `strings`, without the numpy types.
 _NUMBERS = (
@@ -10,11 +11,12 @@ _NUMBERS = (
     datetime.datetime, datetime.date, datetime.timedelta, datetime.time,
 )
 _STRINGS = (str, bytes, memoryview)
+_UUID_STR = (uuid.UUID, str)
 _ZEROED = ("hour", "minute", "second", "microsecond")
 _TRUNCATE_FROM = {"day": 0, "hour": 1, "minute": 2, "second": 3}
 
 
-def _type_groups(groups, ignore_string_type_changes, ignore_numeric_type_changes):
+def _type_groups(groups, ignore_string_type_changes, ignore_numeric_type_changes, ignore_uuid_types):
     """`get_ignore_types_in_groups`: each group a tuple of types."""
     if groups and isinstance(groups[0], type):
         groups = [groups]
@@ -26,6 +28,8 @@ def _type_groups(groups, ignore_string_type_changes, ignore_numeric_type_changes
         result.append(_STRINGS)
     if ignore_numeric_type_changes and _NUMBERS not in result:
         result.append(_NUMBERS)
+    if ignore_uuid_types and _UUID_STR not in result:
+        result.append(_UUID_STR)
     return result
 
 
@@ -33,7 +37,7 @@ def native_options(
     builtin_types, *, significant_digits, number_format_notation, math_epsilon, use_log_scale,
     log_scale_similarity_threshold, ignore_nan_inequality, ignore_string_case,
     ignore_numeric_type_changes, ignore_string_type_changes, ignore_type_in_groups,
-    ignore_type_subclasses, truncate_datetime,
+    ignore_type_subclasses, truncate_datetime, ignore_uuid_types=False,
 ):
     """The native `DeepDiff` keyword arguments for these options."""
     if significant_digits is not None and significant_digits < 0:
@@ -58,7 +62,10 @@ def native_options(
         "ignore_string_case": ignore_string_case,
         "ignore_numeric_type_changes": ignore_numeric_type_changes,
     }
-    groups = _type_groups(ignore_type_in_groups, ignore_string_type_changes, ignore_numeric_type_changes)
+    groups = _type_groups(
+        ignore_type_in_groups, ignore_string_type_changes, ignore_numeric_type_changes,
+        ignore_uuid_types,
+    )
     if groups:
         # ponytail: a u64 mask, so at most 64 groups.
         def group_mask(cls):

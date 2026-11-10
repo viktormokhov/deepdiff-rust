@@ -17,6 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::sync::Arc;
 
+pub use crate::leaf::Leaf;
 use crate::path::{PathSegment, entry_path_segment};
 
 use num_bigint::BigInt;
@@ -256,6 +257,8 @@ pub enum Value {
     FrozenSet(SetItems),
     /// An object with key-sorted entries — see [`Object`].
     Object(Object),
+    /// A `bytes`, `Decimal`, `UUID` or `complex` — see [`Leaf`].
+    Leaf(Typed<Box<Leaf>>),
 }
 
 /// One [`Object`] key: a `str` or any other key `DeepDiff` accepts. No `Hash` impl;
@@ -401,6 +404,7 @@ pub(crate) fn class_name(value: &Value) -> Option<&str> {
         Value::Array(t) | Value::Tuple(t) => t.class_name(),
         Value::Set(items) | Value::FrozenSet(items) => items.type_name(),
         Value::Object(map) => map.type_name(),
+        Value::Leaf(t) => t.class_name(),
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => None,
     }
 }
@@ -439,6 +443,7 @@ impl Value {
             Value::Date(value) => serde_json::Value::String(value.isoformat()),
             Value::Time(value) => serde_json::Value::String(value.isoformat()),
             Value::TimeDelta(value) => serde_json::Value::String(value.python_str()),
+            Value::Leaf(leaf) => leaf.to_serde_json(),
             Value::Array(items) | Value::Tuple(items) => {
                 serde_json::Value::Array(items.iter().map(Value::to_serde_json).collect())
             }
@@ -509,7 +514,8 @@ pub fn contains_wtf8(value: &Value) -> bool {
             | Value::DateTime(_)
             | Value::Date(_)
             | Value::Time(_)
-            | Value::TimeDelta(_) => {}
+            | Value::TimeDelta(_)
+            | Value::Leaf(_) => {}
             Value::Array(items) | Value::Tuple(items) => stack.extend(items.iter()),
             Value::Set(items) | Value::FrozenSet(items) => stack.extend(items.iter()),
             Value::Object(obj) => {
@@ -627,7 +633,8 @@ fn take_children(value: &mut Value, stack: &mut Vec<Value>) {
         | Value::DateTime(_)
         | Value::Date(_)
         | Value::Time(_)
-        | Value::TimeDelta(_) => {}
+        | Value::TimeDelta(_)
+        | Value::Leaf(_) => {}
     }
 }
 
@@ -677,6 +684,11 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
             }
             (Value::TimeDelta(x), Value::TimeDelta(y)) => {
                 if x != y {
+                    return false;
+                }
+            }
+            (Value::Leaf(x), Value::Leaf(y)) => {
+                if ***x != ***y {
                     return false;
                 }
             }
@@ -990,6 +1002,7 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
             Value::Date(_) => 11,
             Value::Time(_) => 12,
             Value::TimeDelta(_) => 13,
+            Value::Leaf(_) => 14,
         }
     }
 
@@ -1039,6 +1052,7 @@ fn canonical_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
                         .then_with(|| x.sort_instant().cmp(&y.sort_instant()))
                         .then_with(|| x.utc_offset_seconds().cmp(&y.utc_offset_seconds())),
                     (Value::TimeDelta(x), Value::TimeDelta(y)) => x.value().cmp(&y.value()),
+                    (Value::Leaf(x), Value::Leaf(y)) => x.total_cmp(y),
                     (Value::Array(x), Value::Array(y)) | (Value::Tuple(x), Value::Tuple(y)) => {
                         push_slices(&mut stack, x, y);
                         Ordering::Equal
@@ -1208,6 +1222,8 @@ struct ObjectClass {
     /// The converted object's address, held alive for the diff; equal addresses are the
     /// identical object, which `DeepDiff` never walks.
     instance: Option<usize>,
+    /// A Python `Enum` member, whose `value` `use_enum_value` compares.
+    is_enum: bool,
 }
 
 /// The lengths `ignore_order`'s distance reads off a custom object beyond its attributes.
@@ -1266,6 +1282,7 @@ impl Object {
                 lengths: ObjectLengths::default(),
                 class_attributes: Box::default(),
                 instance: None,
+                is_enum: false,
             })
         });
         self
@@ -1290,8 +1307,25 @@ impl Object {
             lengths,
             class_attributes: class_attributes.into_boxed_slice(),
             instance,
+            is_enum: false,
         }));
         self
+    }
+
+    /// Marks a custom object as a Python `Enum` member.
+    pub fn mark_enum(&mut self) {
+        if let Some(class) = &mut self.class {
+            class.is_enum = true;
+        }
+    }
+
+    /// An `Enum` member's `value` attribute, `None` for any other object.
+    #[must_use]
+    pub fn enum_value(&self) -> Option<&Value> {
+        let is_enum = self.class.as_ref().is_some_and(|class| class.is_enum);
+        is_enum
+            .then(|| self.get(&ObjectKey::Str(Key::Utf8("value".into()))))
+            .flatten()
     }
 
     /// The address of the Python object a custom object was converted from.
