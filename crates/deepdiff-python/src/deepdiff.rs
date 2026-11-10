@@ -5,11 +5,12 @@
 
 use deepdiff_core::Value;
 use deepdiff_core::diff::Resolution;
+use deepdiff_core::path::{PathSegment, render_path};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyType};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::convert::{
     Held, objects_by_identity, render_report, resolve_token, to_value, token_error,
@@ -40,20 +41,56 @@ pub(crate) struct DeepDiff {
 #[pymethods]
 impl DeepDiff {
     #[new]
-    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None))]
+    #[pyo3(signature = (t1, t2, ignore_order=false, max_depth=None, exclude_types=None, ignore_private_variables=true, skip=None))]
+    #[allow(clippy::too_many_arguments)] // mirrors the Python keyword signature
     fn new(
         py: Python<'_>,
         t1: &Bound<'_, PyAny>,
         t2: &Bound<'_, PyAny>,
         ignore_order: bool,
         max_depth: Option<usize>,
+        exclude_types: Option<Bound<'_, PyAny>>,
+        ignore_private_variables: bool,
+        skip: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let opts = resolve_options(max_depth, ignore_order)?;
         let mut held = Held::new(opts.max_depth);
+        held.exclude_types = exclude_types.map(Bound::unbind);
         let (a, a_may_have_wtf8) = to_value(t1, opts.max_depth, &mut held)?;
         let (b, b_may_have_wtf8) = to_value(t2, opts.max_depth, &mut held)?;
         // A class attribute or cycle token is resolved the first time the
         // diff compares one, then the diff reruns with it available.
+        // ponytail: filters drop findings after the diff instead of pruning it, so an
+        // excluded part still pairs under ignore_order; prune in the core if that matters.
+        let excluded = std::mem::take(&mut held.excluded);
+        let skip_error = Mutex::new(None);
+        let keep = |path: &[PathSegment]| {
+            if ignore_private_variables && path.iter().any(is_private_key) {
+                return false;
+            }
+            let Some(skip) = &skip else { return true };
+            let prefixes: Vec<String> = (0..=path.len())
+                .map(|k| render_path(&path[..k]).to_string())
+                .collect();
+            let typed: Vec<bool> = (0..=path.len())
+                .map(|k| excluded.contains(&path[..k]))
+                .collect();
+            Python::attach(|py| {
+                match skip
+                    .call1(py, (prefixes, typed))
+                    .and_then(|r| r.is_truthy(py))
+                {
+                    Ok(skipped) => !skipped,
+                    Err(err) => {
+                        skip_error
+                            .lock()
+                            .expect("never poisoned")
+                            .get_or_insert(err);
+                        true
+                    }
+                }
+            })
+        };
         let mut index = None;
         let mut deep = false;
         let report_value = loop {
@@ -71,7 +108,7 @@ impl DeepDiff {
                     Python::attach(|py| resolve_token(py, identity, held, !deep))
                         .map(Resolution::Shared)
                 };
-                diff_to_value(py, a, b, opts, &mut resolver, deep)?
+                diff_to_value(py, a, b, opts, &mut resolver, deep, Some(&keep))?
             };
             if held.needs_worker && !deep {
                 deep = true;
@@ -79,6 +116,9 @@ impl DeepDiff {
             }
             break report_value;
         };
+        if let Some(err) = skip_error.lock().expect("never poisoned").take() {
+            return Err(err);
+        }
         if let Some(err) = held.interrupt(py) {
             return Err(err);
         }
@@ -180,4 +220,9 @@ impl DeepDiff {
 
 fn is_empty_report(value: &Value) -> bool {
     matches!(value, Value::Object(map) if map.is_empty())
+}
+
+/// A `str` dict key `ignore_private_variables` hides: one starting `__`.
+fn is_private_key(segment: &PathSegment) -> bool {
+    matches!(segment, PathSegment::Key(key) if key.as_bytes().starts_with(b"__"))
 }

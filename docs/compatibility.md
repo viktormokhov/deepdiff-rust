@@ -20,9 +20,16 @@ Implemented, checked against `deepdiff==9.1.0`:
 - `to_dict(verbose_level=...)`, `to_json(verbose_level=..., **json_dumps_kwargs)`,
   `affected_paths`, `affected_root_keys`, `t1`, `t2`.
 - `type_changes` reports type objects in `to_dict()`, type names in `to_json()`.
+- `exclude_paths`, `include_paths` (exact, bare keys, and `*`/`**` globs),
+  `exclude_regex_paths`, `exclude_types`, `ignore_private_variables`.
 
 Known divergences: report key order follows sorted paths, not traversal
 order; `affected_paths` and `affected_root_keys` are plain `set`s.
+Filters drop findings after the diff rather than pruning it, so under
+`ignore_order` an excluded part still takes part in pairing items;
+`exclude_types` does not see inside set members; and
+`ignore_private_variables=False` uncovers `__` dict keys but not an
+object's `__` attributes.
 
 Onix implements a useful subset of DeepDiff's core comparison API and converts
 supported live Python objects directly into its native value model. Its documented
@@ -35,7 +42,6 @@ silently coerced.
 
 The pinned Onix revision documents these unsupported DeepDiff features:
 
-- `exclude_paths` and `include_paths`
 - `significant_digits`
 - custom operators
 - Delta / patch functionality

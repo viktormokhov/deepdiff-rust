@@ -28,7 +28,7 @@ pub(crate) fn diff_json(
     // `docs/design/value-model.md`.
     let a_value = parse_json(a, "a")?;
     let b_value = parse_json(b, "b")?;
-    let report_value = diff_to_value(py, &a_value, &b_value, opts, &mut |_| None, false)?;
+    let report_value = diff_to_value(py, &a_value, &b_value, opts, &mut |_| None, false, None)?;
     // `false`: parsed JSON text can never hold a lone surrogate escape.
     serialize_value(
         py,

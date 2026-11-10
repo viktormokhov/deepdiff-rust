@@ -10,11 +10,15 @@
 //! objects runs on the calling thread instead, so it must itself be iterative.
 
 use deepdiff_core::diff::Resolver;
+use deepdiff_core::path::PathSegment;
 use deepdiff_core::{DEFAULT_MAX_DEPTH, DiffOptions, Value};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::errors::map_diff_error;
+
+/// Whether a finding at a structural path stays in the report.
+pub(crate) type Keep<'a> = dyn Fn(&[PathSegment]) -> bool + Sync + 'a;
 
 /// The largest `max_depth` a Python caller may request through either entry
 /// point. A value above this is rejected with a catchable `ValueError`
@@ -100,12 +104,17 @@ pub(crate) fn diff_to_value<'r>(
     opts: DiffOptions,
     resolver: &'r mut Resolver<'r>,
     deep: bool,
+    keep: Option<&Keep<'_>>,
 ) -> PyResult<Value> {
     let mut resolver = Some(resolver);
     let mut diff = move || {
         let resolver = resolver.take().expect("the diff runs once");
-        deepdiff_core::diff::diff_with_resolver(a, b, &opts, resolver)
-            .map(|report| report.to_value())
+        deepdiff_core::diff::diff_with_resolver(a, b, &opts, resolver).map(|mut report| {
+            if let Some(keep) = keep {
+                report.retain(keep);
+            }
+            report.to_value()
+        })
     };
     if deep || is_deep(a) || is_deep(b) {
         run_on_worker(py, opts.max_depth, diff)?

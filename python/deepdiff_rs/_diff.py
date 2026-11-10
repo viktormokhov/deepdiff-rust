@@ -5,6 +5,7 @@ import datetime
 import json
 
 from . import _native
+from ._paths import skip_filter
 
 _BUILTIN_TYPES = {
     t.__name__: t
@@ -44,13 +45,22 @@ def _root_key(path):
 class DeepDiff(dict):
     """A drop-in `deepdiff.DeepDiff`: the differences between `t1` and `t2` as a dict."""
 
-    def __init__(self, t1, t2, *, ignore_order=False, max_depth=None, verbose_level=1, view="text"):
+    def __init__(
+        self, t1, t2, *, ignore_order=False, max_depth=None, verbose_level=1, view="text",
+        exclude_paths=None, exclude_regex_paths=None, include_paths=None, exclude_types=None,
+        ignore_private_variables=True,
+    ):
         if view != "text":
             raise NotImplementedError(f"view={view!r} is not supported yet; only view='text' is.")
         self.verbose_level = _check_verbose_level(verbose_level)
         self.t1 = t1
         self.t2 = t2
-        self._native = _native.DeepDiff(t1, t2, ignore_order=ignore_order, max_depth=max_depth)
+        exclude_types = tuple(exclude_types) if exclude_types else None
+        skip = skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types)
+        self._native = _native.DeepDiff(
+            t1, t2, ignore_order=ignore_order, max_depth=max_depth, exclude_types=exclude_types,
+            ignore_private_variables=ignore_private_variables, skip=skip,
+        )
         super().__init__(self.to_dict())
 
     def to_dict(self, verbose_level=None):

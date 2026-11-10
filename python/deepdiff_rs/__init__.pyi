@@ -1,3 +1,5 @@
+from collections.abc import Iterable
+from re import Pattern
 from typing import Any
 
 __version__: str
@@ -23,6 +25,11 @@ class DeepDiff(dict[str, Any]):
         max_depth: int | None = ...,
         verbose_level: int = ...,
         view: str = ...,
+        exclude_paths: str | Iterable[str] | None = ...,
+        exclude_regex_paths: str | Pattern[str] | Iterable[str | Pattern[str]] | None = ...,
+        include_paths: str | Iterable[str] | None = ...,
+        exclude_types: Iterable[type] | None = ...,
+        ignore_private_variables: bool = ...,
     ) -> None: ...
     def to_dict(self, verbose_level: int | None = ...) -> dict[str, Any]:
         """The differences as a plain dict, with ``type_changes`` types as type objects."""

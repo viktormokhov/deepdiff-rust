@@ -5,7 +5,7 @@
 //!
 //! Supported types and the errors raised for the rest: the README's "Known
 //! limitations" section.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use deepdiff_core::datetime::{
@@ -417,6 +417,9 @@ pub(crate) struct Held {
     /// `to_dict()` can report `type_changes` types as type objects. The first
     /// class wins when two share a `__name__`.
     pub(crate) types: HashMap<Arc<str>, Py<PyType>>,
+    /// `exclude_types`, and the paths in either input holding an instance of one.
+    pub(crate) exclude_types: Option<Py<PyAny>>,
+    pub(crate) excluded: BTreeSet<Vec<PathSegment>>,
     pub(crate) saw_wtf8: bool,
     pub(crate) needs_render: bool,
     pub(crate) needs_worker: bool,
@@ -444,6 +447,8 @@ impl Held {
             enum_lengths: HashMap::new(),
             max_depth,
             types: HashMap::new(),
+            exclude_types: None,
+            excluded: BTreeSet::new(),
             saw_wtf8: false,
             needs_render: false,
             needs_worker: false,
@@ -1126,6 +1131,11 @@ pub(crate) fn to_value(
 
     loop {
         if let Some((current, depth, set_member)) = pending.take() {
+            if let Some(types) = &held.exclude_types
+                && current.is_instance(types.bind(py))?
+            {
+                held.excluded.insert(path.clone());
+            }
             let step = if depth > max_depth {
                 Err(max_depth_error(max_depth, &path))
             } else {

@@ -288,6 +288,28 @@ impl Report {
         Self::default()
     }
 
+    /// Drops every finding whose structural path `keep` rejects.
+    pub fn retain(&mut self, mut keep: impl FnMut(&[PathSegment]) -> bool) {
+        self.type_changes.retain(|path, _| keep(path));
+        self.values_changed.retain(|path, _| keep(path));
+        for map in [
+            &mut self.dictionary_item_added,
+            &mut self.dictionary_item_removed,
+            &mut self.iterable_item_added,
+            &mut self.iterable_item_removed,
+        ] {
+            map.retain(|path, _| keep(path));
+        }
+        if let Some(sets) = &mut self.set_items {
+            sets.added.retain(|path, _| keep(path));
+            sets.removed.retain(|path, _| keep(path));
+        }
+        if let Some(attributes) = &mut self.attribute_items {
+            attributes.added.retain(|path, _| keep(path));
+            attributes.removed.retain(|path, _| keep(path));
+        }
+    }
+
     /// Records a `type_changes` finding at the structural `path`.
     pub(crate) fn insert_type_change(&mut self, path: Vec<PathSegment>, entry: TypeChangeEntry) {
         insert_checked(&mut self.type_changes, path, entry);
