@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import pytest
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff
+from deepdiff_rust import DeepDiff
 
 
 @dataclass

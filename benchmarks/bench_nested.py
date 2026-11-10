@@ -13,7 +13,7 @@ import statistics
 import time
 
 from deepdiff import DeepDiff as PythonDeepDiff
-from deepdiff_rs import DeepDiff as RustDeepDiff
+from deepdiff_rust import DeepDiff as RustDeepDiff
 
 
 def make_tree(groups, records, fields, changed_every=0):
@@ -74,7 +74,7 @@ def main():
         changes = sum(map(len, rust.values()))
         print(
             f"{name:12} changes={changes:<6} deepdiff={python_s:8.2f}s "
-            f"deepdiff_rs={rust_s:6.3f}s  x{python_s / rust_s:,.0f}"
+            f"deepdiff_rust={rust_s:6.3f}s  x{python_s / rust_s:,.0f}"
         )
 
 

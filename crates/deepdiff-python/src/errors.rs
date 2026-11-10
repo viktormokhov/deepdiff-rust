@@ -5,7 +5,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::PyValueError;
 
 create_exception!(
-    deepdiff_rs,
+    deepdiff_rust,
     MaxDepthError,
     PyValueError,
     "Raised when diffing two values would need to recurse past the configured `max_depth`. A \

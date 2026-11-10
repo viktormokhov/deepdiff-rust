@@ -35,13 +35,13 @@ def test_wheel_ships_the_stub_and_py_typed_marker(wheel_path: Path) -> None:
     with zipfile.ZipFile(wheel_path) as wheel:
         names = set(wheel.namelist())
 
-    assert "deepdiff_rs/__init__.pyi" in names
-    assert "deepdiff_rs/py.typed" in names
+    assert "deepdiff_rust/__init__.pyi" in names
+    assert "deepdiff_rust/py.typed" in names
 
 
 def test_wheel_stub_content_matches_the_source_stub(wheel_path: Path) -> None:
-    source = (CRATE_ROOT / "python" / "deepdiff_rs" / "__init__.pyi").read_text()
+    source = (CRATE_ROOT / "python" / "deepdiff_rust" / "__init__.pyi").read_text()
     with zipfile.ZipFile(wheel_path) as wheel:
-        packaged = wheel.read("deepdiff_rs/__init__.pyi").decode()
+        packaged = wheel.read("deepdiff_rust/__init__.pyi").decode()
 
     assert packaged == source

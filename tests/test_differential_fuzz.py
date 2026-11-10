@@ -1,6 +1,6 @@
 """Differential fuzz test: onix's Python bindings vs real DeepDiff on live objects.
 
-Runs through `deepdiff_rs.DeepDiff`, exercising the Python-object-to-`Value` conversion
+Runs through `deepdiff_rust.DeepDiff`, exercising the Python-object-to-`Value` conversion
 layer. Batches of seeded cases run twice (ordered and `ignore_order=True`; the surrogate
 batch runs ordered only), comparing `to_json()` (parsed) and `to_dict()`; the
 custom-object batch compares `to_json()` alone and the enum and class-attribute batches

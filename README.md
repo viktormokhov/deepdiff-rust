@@ -24,14 +24,14 @@ python -m pytest
 The package exposes a separate import namespace so it can coexist with the reference DeepDiff package for differential testing:
 
 ```python
-from deepdiff_rs import DeepDiff
+from deepdiff_rust import DeepDiff
 
 diff = DeepDiff({"a": 1}, {"a": 2})
 print(diff.to_dict())
 print(diff.to_json())
 ```
 
-The project distribution is named `deepdiff-rust`; its import package is `deepdiff_rs`. This lets the original `deepdiff` package remain installed as a differential-test oracle. A separate import-compatibility shim can be considered later, but should not shadow the reference package in the same environment.
+The project distribution is named `deepdiff-rust`; its import package is `deepdiff_rust`. This lets the original `deepdiff` package remain installed as a differential-test oracle. A separate import-compatibility shim can be considered later, but should not shadow the reference package in the same environment.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ The project distribution is named `deepdiff-rust`; its import package is `deepdi
   see [ADR 0002](docs/architecture/adr-0002-fork-onix.md)).
 - `crates/deepdiff-python`: PyO3 extension and the public Python package
   integration.
-- `python/deepdiff_rs`: Python import facade.
+- `python/deepdiff_rust`: Python import facade.
 - `tests`: Python API and differential tests.
 
 The Rust core performs structural comparison. The Python adapter

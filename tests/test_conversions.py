@@ -1,8 +1,8 @@
 """Conversion tests: accepted types, subclasses, custom objects, and every refused-input path.
 
-Covers `deepdiff_rs.DeepDiff`'s Python-object-to-`Value` conversion (see
+Covers `deepdiff_rust.DeepDiff`'s Python-object-to-`Value` conversion (see
 the README's "Known limitations" section for the supported types) and
-`deepdiff_rs.diff_json`'s JSON-parse error path.
+`deepdiff_rust.diff_json`'s JSON-parse error path.
 """
 
 import abc
@@ -24,7 +24,7 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import MaxDepthError, diff_json
+from deepdiff_rust import MaxDepthError, diff_json
 from conftest import Level2DeepDiff as DeepDiff
 
 

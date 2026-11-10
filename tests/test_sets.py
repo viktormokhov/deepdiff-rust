@@ -19,7 +19,7 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import diff_json
+from deepdiff_rust import diff_json
 from conftest import Level2DeepDiff as DeepDiff
 
 # Seeded float corpus size for the repr differential below, and how many are

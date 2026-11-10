@@ -77,7 +77,7 @@ pub(crate) fn resolve_options(
     let max_depth = max_depth.unwrap_or(DEFAULT_MAX_DEPTH);
     if max_depth > MAX_DEPTH_CEILING {
         return Err(PyValueError::new_err(format!(
-            "max_depth {max_depth} exceeds deepdiff_rs's ceiling of {MAX_DEPTH_CEILING}; \
+            "max_depth {max_depth} exceeds deepdiff_rust's ceiling of {MAX_DEPTH_CEILING}; \
              diffing values nested that deep cannot be done without risking a native stack \
              overflow that would crash the interpreter, so it is refused up front. Reduce \
              max_depth to at most {MAX_DEPTH_CEILING}."
@@ -98,7 +98,7 @@ pub(crate) fn resolve_options(
 ///
 /// # Errors
 ///
-/// `deepdiff_rs.MaxDepthError` if the diff would exceed `opts.max_depth`.
+/// `deepdiff_rust.MaxDepthError` if the diff would exceed `opts.max_depth`.
 pub(crate) fn diff_to_value<'r>(
     py: Python<'_>,
     a: &Value,
@@ -304,7 +304,7 @@ where
         std::thread::scope(|scope| {
             match std::thread::Builder::new()
                 .stack_size(worker_stack_bytes(max_depth))
-                .name("deepdiff-rs-diff".to_string())
+                .name("deepdiff-rust-diff".to_string())
                 .spawn_scoped(scope, f)
             {
                 Ok(handle) => handle.join().map_err(|_| WorkerFailure::Panicked),
@@ -315,10 +315,10 @@ where
 
     outcome.map_err(|failure| match failure {
         WorkerFailure::SpawnFailed(message) => PyRuntimeError::new_err(format!(
-            "deepdiff_rs could not spawn its diff worker thread: {message}"
+            "deepdiff_rust could not spawn its diff worker thread: {message}"
         )),
         WorkerFailure::Panicked => PyRuntimeError::new_err(
-            "deepdiff_rs's diff worker thread panicked; this is an internal bug, please report it",
+            "deepdiff_rust's diff worker thread panicked; this is an internal bug, please report it",
         ),
     })
 }

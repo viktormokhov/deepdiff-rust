@@ -23,7 +23,7 @@ use crate::verbose::at_verbose_level;
 /// `verbose_level=2`. `max_depth` defaults to 512; deeper input raises
 /// `MaxDepthError`. Supported types and errors:
 /// <https://github.com/ksco92/onix#known-limitations>
-#[pyclass(module = "deepdiff_rs")]
+#[pyclass(module = "deepdiff_rust")]
 pub(crate) struct DeepDiff {
     report_value: Value,
     /// Whether `report_value` needs the worker thread to render; computed once

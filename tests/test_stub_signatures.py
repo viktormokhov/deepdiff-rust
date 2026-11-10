@@ -1,4 +1,4 @@
-"""Checks that ``deepdiff_rs.pyi`` cannot drift from the built module.
+"""Checks that ``deepdiff_rust.pyi`` cannot drift from the built module.
 
 Compares each stub function, method, and property's parameter names, defaults,
 and keyword-only markers against ``inspect.signature()`` of the compiled object.
@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
-import deepdiff_rs
+import deepdiff_rust
 
-STUB_PATH = Path(__file__).resolve().parent.parent / "python" / "deepdiff_rs" / "__init__.pyi"
+STUB_PATH = Path(__file__).resolve().parent.parent / "python" / "deepdiff_rust" / "__init__.pyi"
 
 
 def _params(args: ast.arguments) -> list[tuple[str, bool, bool]]:
@@ -76,22 +76,22 @@ def test_stub_declares_the_whole_public_surface() -> None:
     """Every public name the built module actually exports has a stub entry, and vice versa.
     """
     module_names = {
-        n for n in dir(deepdiff_rs) if (not n.startswith("_") or n == "__version__") and n != "deepdiff_rs"
+        n for n in dir(deepdiff_rust) if (not n.startswith("_") or n == "__version__") and n != "deepdiff_rust"
     }
     stub_names = set(FUNCTIONS) | set(CLASSES) | CONSTANTS
     assert module_names == stub_names
-    assert isinstance(deepdiff_rs.MAX_DEPTH_CEILING, int)
-    assert isinstance(deepdiff_rs.__version__, str)
+    assert isinstance(deepdiff_rust.MAX_DEPTH_CEILING, int)
+    assert isinstance(deepdiff_rust.__version__, str)
 
 
 def test_version_matches_the_published_distribution() -> None:
-    assert deepdiff_rs.__version__ == importlib.metadata.version("deepdiff-rust")
+    assert deepdiff_rust.__version__ == importlib.metadata.version("deepdiff-rust")
 
 
 @pytest.mark.parametrize("name", sorted(FUNCTIONS))
 def test_module_function_signature_matches_the_stub(name: str) -> None:
     stub_params = _params(FUNCTIONS[name].args)
-    runtime_params = _runtime_params(getattr(deepdiff_rs, name))
+    runtime_params = _runtime_params(getattr(deepdiff_rust, name))
     assert stub_params == runtime_params
 
 
@@ -104,7 +104,7 @@ def test_deepdiff_init_signature_matches_the_stub() -> None:
 
     init = _class_members(CLASSES["DeepDiff"])["__init__"]
     stub_params = _params(init.args)
-    runtime_params = _runtime_params(deepdiff_rs.DeepDiff)
+    runtime_params = _runtime_params(deepdiff_rust.DeepDiff)
     assert stub_params == runtime_params
 
 
@@ -123,7 +123,7 @@ def _every_stub_method() -> list[tuple[str, str]]:
 def test_method_signature_matches_the_stub(class_name: str, method_name: str) -> None:
     node = _class_members(CLASSES[class_name])[method_name]
     stub_params = _params(node.args)
-    real_class = getattr(deepdiff_rs, class_name)
+    real_class = getattr(deepdiff_rust, class_name)
     runtime_params = _runtime_params(getattr(real_class, method_name))
     assert stub_params == runtime_params
 
@@ -138,7 +138,7 @@ STUB_ITEMS = {
 @pytest.mark.parametrize("path", sorted(STUB_ITEMS))
 def test_stub_docstring_is_the_runtime_first_sentence(path: str) -> None:
     """The stub carries each item's first runtime ``__doc__`` sentence, or none for a slot."""
-    runtime = functools.reduce(getattr, path.split("."), deepdiff_rs)
+    runtime = functools.reduce(getattr, path.split("."), deepdiff_rust)
     doc = None if isinstance(runtime, types.WrapperDescriptorType) else runtime.__doc__
     first = re.split(r"(?<=\.)\s", doc.strip(), maxsplit=1)[0] if doc else None
     expected = " ".join(first.split()).replace("`", "``") if first else None
@@ -148,4 +148,4 @@ def test_stub_docstring_is_the_runtime_first_sentence(path: str) -> None:
 def test_max_depth_error_is_a_value_error_subclass_in_both_places() -> None:
     (base,) = CLASSES["MaxDepthError"].bases
     assert isinstance(base, ast.Name) and base.id == "ValueError"
-    assert issubclass(deepdiff_rs.MaxDepthError, ValueError)
+    assert issubclass(deepdiff_rust.MaxDepthError, ValueError)

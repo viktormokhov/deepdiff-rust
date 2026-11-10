@@ -31,7 +31,7 @@ import sys
 sys.path.insert(0, "__PERF_DIR__")
 from generate_fixtures import build_api_payloads
 
-from deepdiff_rs import DeepDiff
+from deepdiff_rust import DeepDiff
 
 
 def rss_mb():

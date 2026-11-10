@@ -2,7 +2,7 @@
 
 import pytest
 
-from deepdiff_rs import DeepDiff
+from deepdiff_rust import DeepDiff
 
 
 def require_deepdiff() -> None:
@@ -13,7 +13,7 @@ def require_deepdiff() -> None:
 def _normalize_types(value: object) -> object:
     """Replace any Python type object in a report with its name: real DeepDiff
     reports `type_changes`' `old_type`/`new_type` as the type objects
-    themselves, where `deepdiff_rs` reports their names."""
+    themselves, where `deepdiff_rust` reports their names."""
     if isinstance(value, dict):
         return {key: _normalize_types(item) for key, item in value.items()}
 
@@ -30,7 +30,7 @@ def _normalize_types(value: object) -> object:
 
 
 class Level2DeepDiff(DeepDiff):
-    """``deepdiff_rs.DeepDiff`` at ``verbose_level=2``, the level the Onix-derived tests assume."""
+    """``deepdiff_rust.DeepDiff`` at ``verbose_level=2``, the level the Onix-derived tests assume."""
 
     def __init__(self, t1, t2, **kwargs):
         kwargs.setdefault("verbose_level", 2)

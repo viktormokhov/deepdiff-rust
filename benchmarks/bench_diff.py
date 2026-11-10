@@ -18,7 +18,7 @@ import tracemalloc
 from typing import Any, Callable
 
 from deepdiff import DeepDiff as PythonDeepDiff
-from deepdiff_rs import DeepDiff as RustDeepDiff
+from deepdiff_rust import DeepDiff as RustDeepDiff
 
 
 def make_dict(size: int, changed_every: int) -> tuple[dict[str, Any], dict[str, Any]]:

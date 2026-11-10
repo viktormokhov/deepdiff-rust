@@ -9,7 +9,7 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff  # noqa: E402
 
-from deepdiff_rs import DeepDiff  # noqa: E402
+from deepdiff_rust import DeepDiff  # noqa: E402
 
 
 class C(enum.Enum):

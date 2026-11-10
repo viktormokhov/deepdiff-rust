@@ -1,4 +1,4 @@
-//! PyO3 bindings for `deepdiff_core`, imported in Python as `deepdiff_rs`.
+//! PyO3 bindings for `deepdiff_core`, imported in Python as `deepdiff_rust`.
 
 mod convert;
 mod deepdiff;

@@ -6,7 +6,7 @@ from collections import OrderedDict
 import pytest
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff
+from deepdiff_rust import DeepDiff
 
 F1, F2 = [1.0001, 2.5, 3.14159, -0.0004], [1.0002, 2.5004, 3.14161, 0.0003]
 CASES = [

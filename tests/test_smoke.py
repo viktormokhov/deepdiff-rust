@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import pytest
 from deepdiff import DeepDiff as ReferenceDeepDiff
 
-from deepdiff_rs import DeepDiff, diff_json
+from deepdiff_rust import DeepDiff, diff_json
 
 
 def assert_matches_reference(old, new, **kwargs):

@@ -15,7 +15,7 @@ from typing import Union
 
 import pytest
 
-from deepdiff_rs import MAX_DEPTH_CEILING, MaxDepthError, diff_json
+from deepdiff_rust import MAX_DEPTH_CEILING, MaxDepthError, diff_json
 from conftest import Level2DeepDiff as DeepDiff
 
 JsonValue = Union[dict[str, "JsonValue"], list["JsonValue"], str, int, float, bool, None]
@@ -33,7 +33,7 @@ def _run_isolated(body: str) -> subprocess.CompletedProcess[str]:
         and exit 0 on success.
     :return: The completed subprocess (inspect ``returncode``/``stderr``).
     """
-    src = "from deepdiff_rs import DeepDiff, MaxDepthError, diff_json\n" + textwrap.dedent(body)
+    src = "from deepdiff_rust import DeepDiff, MaxDepthError, diff_json\n" + textwrap.dedent(body)
     return subprocess.run(
         [sys.executable, "-c", src],
         capture_output=True,

@@ -11,7 +11,7 @@ use crate::guard::{diff_to_value, is_deep, resolve_options, serialize_value};
 /// string (`verbose_level=2` shape).
 ///
 /// Raises `ValueError` if `a` or `b` fails to parse as JSON or if `max_depth`
-/// exceeds `deepdiff_rs.MAX_DEPTH_CEILING`, and `deepdiff_rs.MaxDepthError` if
+/// exceeds `deepdiff_rust.MAX_DEPTH_CEILING`, and `deepdiff_rust.MaxDepthError` if
 /// diffing would recurse past `max_depth`; the depth guard is in
 /// `crates/onix-py/src/guard.rs` of the onix repository.
 #[pyfunction]

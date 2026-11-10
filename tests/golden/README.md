@@ -105,7 +105,7 @@ readers:
   own value model.
 
 **The product never interprets a tag.** `onix_core::Value`'s `Deserialize`,
-`deepdiff_rs.diff_json`, the `DeepDiff` class, and the CLI all read
+`deepdiff_rust.diff_json`, the `DeepDiff` class, and the CLI all read
 `{"$tuple": [1]}` or `{"$datetime": "2024-01-01T00:00:00"}` as the one-key dict
 it is; each of those paths has a test for that.
 

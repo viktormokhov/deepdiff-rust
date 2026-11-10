@@ -13,7 +13,7 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import MAX_DEPTH_CEILING
+from deepdiff_rust import MAX_DEPTH_CEILING
 from conftest import Level2DeepDiff as OnixDeepDiff
 
 from test_differential_fuzz import JsonValue, _gen_value

@@ -7,7 +7,7 @@ from uuid import UUID
 import pytest
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff
+from deepdiff_rust import DeepDiff
 
 U1, U2 = UUID(int=5), UUID("12345678-1234-5678-1234-567812345678")
 CASES = [
