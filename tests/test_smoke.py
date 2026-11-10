@@ -29,3 +29,24 @@ def test_json_fast_path():
         "new_value": 2,
         "old_value": 1,
     }
+
+def test_custom_object_attributes_match_reference():
+    from dataclasses import dataclass
+
+    @dataclass
+    class Point:
+        x: int
+        y: int
+
+    old, new = Point(1, 2), Point(1, 3)
+    assert DeepDiff(old, new).to_dict() == ReferenceDeepDiff(
+        old, new, verbose_level=2
+    ).to_dict()
+
+
+def test_nested_ignore_order_matches_reference():
+    old = [{"id": 1, "tags": ["a", "b"]}, {"id": 2, "tags": ["c"]}]
+    new = [{"id": 2, "tags": ["c"]}, {"id": 1, "tags": ["b", "a"]}]
+    assert DeepDiff(old, new, ignore_order=True).to_dict() == ReferenceDeepDiff(
+        old, new, ignore_order=True, verbose_level=2
+    ).to_dict()
