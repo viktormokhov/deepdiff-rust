@@ -1,6 +1,7 @@
 //! PyO3 bindings. The conversion and JSON fast-path modules are pinned to the
 //! Onix submodule revision recorded in docs/architecture/adr-0001-onix-core.md.
 
+#[allow(dead_code)]
 #[path = "../../../vendor/onix/crates/onix-py/src/convert.rs"]
 mod convert;
 mod deepdiff;
