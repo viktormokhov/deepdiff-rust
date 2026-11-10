@@ -24,7 +24,8 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff, MaxDepthError, diff_json
+from deepdiff_rs import MaxDepthError, diff_json
+from conftest import Level2DeepDiff as DeepDiff
 
 
 # int range
@@ -387,8 +388,8 @@ def test_a_list_subclass_is_accepted_and_compares_as_a_list() -> None:
     cross_type = DeepDiff(MyList([1, 2]), [1, 2])
     entry = cross_type.to_dict()["type_changes"]["root"]
     assert entry == {
-        "old_type": "MyList",
-        "new_type": "list",
+        "old_type": MyList,
+        "new_type": list,
         "old_value": [1, 2],
         "new_value": [1, 2],
     }
@@ -412,8 +413,8 @@ def test_a_dict_subclass_is_accepted_and_compares_as_a_dict() -> None:
     cross_type = DeepDiff(MyDict(a=1), {"a": 1})
     entry = cross_type.to_dict()["type_changes"]["root"]
     assert entry == {
-        "old_type": "MyDict",
-        "new_type": "dict",
+        "old_type": MyDict,
+        "new_type": dict,
         "old_value": {"a": 1},
         "new_value": {"a": 1},
     }

@@ -9,7 +9,7 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff as OnixDeepDiff
+from conftest import Level2DeepDiff as OnixDeepDiff
 
 UTC = datetime.timezone.utc
 PLUS_TWO = datetime.timezone(datetime.timedelta(hours=2))

@@ -32,6 +32,8 @@ def _params(args: ast.arguments) -> list[tuple[str, bool, bool]]:
         result.append((arg.arg, i >= defaults_start, False))
     for arg, default in zip(args.kwonlyargs, args.kw_defaults):
         result.append((arg.arg, default is not None, True))
+    if args.kwarg:
+        result.append((args.kwarg.arg, False, False))
     return result
 
 

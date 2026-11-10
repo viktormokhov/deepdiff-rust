@@ -8,7 +8,7 @@ import sys
 import time
 from typing import Final
 
-from deepdiff_rs import DeepDiff
+from conftest import Level2DeepDiff as DeepDiff
 
 FX_SEED: Final[int] = 0x517CC1B727220A95
 MASK: Final[int] = (1 << 64) - 1

@@ -134,7 +134,11 @@ enum Step<'py> {
 
 /// The temporal arm of [`classify`]; `None` when `current` is none of the four
 /// types. `datetime` before `date`: every `datetime` is also a `date`.
-fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResult<Option<CValue>> {
+fn classify_temporal(
+    current: &Bound<'_, PyAny>,
+    path: &[PathSegment],
+    held: &mut Held,
+) -> PyResult<Option<CValue>> {
     if current.cast_exact::<PyDateTime>().is_ok() {
         return Ok(Some(datetime_to_value(current, path, None)?));
     }
@@ -142,7 +146,7 @@ fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResu
         return Ok(Some(datetime_to_value(
             current,
             path,
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         )?));
     }
 
@@ -152,7 +156,7 @@ fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResu
     if current.cast::<PyDate>().is_ok() {
         return Ok(Some(CValue::Date(Typed::with_class_name(
             date_fields(current, path)?,
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         ))));
     }
 
@@ -163,7 +167,7 @@ fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResu
         return Ok(Some(time_to_value(
             current,
             path,
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         )?));
     }
 
@@ -174,7 +178,7 @@ fn classify_temporal(current: &Bound<'_, PyAny>, path: &[PathSegment]) -> PyResu
         return Ok(Some(timedelta_to_value(
             current,
             path,
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         )?));
     }
 
@@ -215,7 +219,7 @@ fn classify<'py>(
         return Ok(Step::Done(CValue::Str(pystring_to_cstr(s)?)));
     }
 
-    if let Some(value) = classify_temporal(current, path)? {
+    if let Some(value) = classify_temporal(current, path, held)? {
         return Ok(Step::Done(value));
     }
 
@@ -225,7 +229,7 @@ fn classify<'py>(
     if !set_member && let Ok(list) = current.cast::<PyList>() {
         return Ok(seq_step(
             SeqIter::List(list.iter()),
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         ));
     }
 
@@ -236,7 +240,7 @@ fn classify<'py>(
     if !set_member && let Ok(tuple) = current.cast::<PyTuple>() {
         return Ok(seq_step(
             SeqIter::Tuple(tuple.iter()),
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         ));
     }
 
@@ -247,7 +251,7 @@ fn classify<'py>(
     if !set_member && let Ok(set) = current.cast::<PySet>() {
         return Ok(seq_step(
             SeqIter::Set(set.iter()),
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         ));
     }
 
@@ -257,7 +261,7 @@ fn classify<'py>(
     if !set_member && let Ok(frozen) = current.cast::<PyFrozenSet>() {
         return Ok(seq_step(
             SeqIter::FrozenSet(frozen.iter()),
-            Some(class_name(current)),
+            Some(class_name(current, held)),
         ));
     }
 
@@ -311,7 +315,7 @@ fn classify_other<'py>(
             .insert(identity.clone(), current.clone().unbind());
         held.cycle_targets.insert(identity.clone());
         return Ok(Step::Done(
-            builder.cycle(class_name(current), Arc::from(identity)),
+            builder.cycle(class_name(current, held), Arc::from(identity)),
         ));
     }
     if let Some(strategy) = object_strategy(current)? {
@@ -409,6 +413,10 @@ pub(crate) struct Held {
     /// Each `Enum` class's length, by class address.
     enum_lengths: HashMap<usize, usize>,
     max_depth: usize,
+    /// Every subclass or custom class seen, by the name a report carries, so
+    /// `to_dict()` can report `type_changes` types as type objects. The first
+    /// class wins when two share a `__name__`.
+    pub(crate) types: HashMap<Arc<str>, Py<PyType>>,
     pub(crate) saw_wtf8: bool,
     pub(crate) needs_render: bool,
     pub(crate) needs_worker: bool,
@@ -435,6 +443,7 @@ impl Held {
             on_path: Vec::new(),
             enum_lengths: HashMap::new(),
             max_depth,
+            types: HashMap::new(),
             saw_wtf8: false,
             needs_render: false,
             needs_worker: false,
@@ -447,7 +456,7 @@ impl Held {
 fn opaque(obj: &Bound<'_, PyAny>, builder: &mut Builder, held: &mut Held) -> CValue {
     held.objects.push(obj.clone().unbind());
     held.needs_render = true;
-    builder.opaque(class_name(obj), Arc::from(identity_of(obj)))
+    builder.opaque(class_name(obj, held), Arc::from(identity_of(obj)))
 }
 
 /// How `_diff_obj` or `_diff_enum` enumerates an accepted object's attributes.
@@ -1639,8 +1648,12 @@ fn type_name(obj: &Bound<'_, PyAny>) -> String {
 /// `type_name`, as the `Arc<str>` [`Typed`]/[`SetItems`]/`deepdiff_core::value::Object`
 /// carry for a subclass instance — see `docs/design/value-model.md`'s
 /// "Subclasses" section.
-fn class_name(obj: &Bound<'_, PyAny>) -> Arc<str> {
-    Arc::from(type_name(obj))
+fn class_name(obj: &Bound<'_, PyAny>, held: &mut Held) -> Arc<str> {
+    let name: Arc<str> = Arc::from(type_name(obj));
+    held.types
+        .entry(Arc::clone(&name))
+        .or_insert_with(|| obj.get_type().unbind());
+    name
 }
 
 /// An [`deepdiff_core::value::Object`]'s class as onix carries it: the `__name__`
@@ -1662,7 +1675,7 @@ fn py_class(obj: &Bound<'_, PyAny>, lengths: ObjectLengths, held: &mut Held) -> 
     let identity = Arc::from(format!("{:x}", ty.as_ptr() as usize));
     held.objects.push(ty.into_any().unbind());
     PyClass {
-        name: class_name(obj),
+        name: class_name(obj, held),
         identity,
         lengths,
         class_attributes: Vec::new(),

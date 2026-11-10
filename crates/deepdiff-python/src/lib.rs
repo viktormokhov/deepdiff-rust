@@ -5,6 +5,7 @@ mod deepdiff;
 mod errors;
 mod fast_path;
 mod guard;
+mod verbose;
 
 use pyo3::prelude::*;
 

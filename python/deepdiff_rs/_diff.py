@@ -1,0 +1,86 @@
+"""The `DeepDiff` result: a `dict` of findings, like `deepdiff.DeepDiff`."""
+
+import ast
+import datetime
+import json
+
+from . import _native
+
+_BUILTIN_TYPES = {
+    t.__name__: t
+    for t in (
+        type(None), bool, int, float, str, list, tuple, set, frozenset, dict,
+        datetime.datetime, datetime.date, datetime.time, datetime.timedelta,
+    )
+}
+
+
+def _check_verbose_level(verbose_level):
+    if verbose_level not in (0, 1, 2):
+        raise ValueError("verbose_level should be 0, 1, or 2.")
+    return verbose_level
+
+
+_NOT_PRESENT = object()
+
+
+def _root_key(path):
+    """The key, index or attribute name right after `root` in a rendered path."""
+    rest = path[len("root"):]
+    if rest.startswith("."):
+        ends = [i for i in (rest.find(".", 1), rest.find("[")) if i > 0]
+        return rest[1 : min(ends, default=len(rest))]
+    # ponytail: tries each "]" until the key parses as a literal; a key whose
+    # repr is not a Python literal is skipped.
+    end = rest.find("]")
+    while end != -1:
+        try:
+            return ast.literal_eval(rest[1:end])
+        except (ValueError, SyntaxError):
+            end = rest.find("]", end + 1)
+    return _NOT_PRESENT
+
+
+class DeepDiff(dict):
+    """A drop-in `deepdiff.DeepDiff`: the differences between `t1` and `t2` as a dict."""
+
+    def __init__(self, t1, t2, *, ignore_order=False, max_depth=None, verbose_level=1, view="text"):
+        if view != "text":
+            raise NotImplementedError(f"view={view!r} is not supported yet; only view='text' is.")
+        self.verbose_level = _check_verbose_level(verbose_level)
+        self.t1 = t1
+        self.t2 = t2
+        self._native = _native.DeepDiff(t1, t2, ignore_order=ignore_order, max_depth=max_depth)
+        super().__init__(self.to_dict())
+
+    def to_dict(self, verbose_level=None):
+        """The differences as a plain dict, with `type_changes` types as type objects."""
+        report = self._native.to_dict(self._level(verbose_level))
+        if "type_changes" in report:
+            classes = {**_BUILTIN_TYPES, **self._native._types}
+            for change in report["type_changes"].values():
+                for key in ("old_type", "new_type"):
+                    change[key] = classes.get(change[key], change[key])
+        return report
+
+    def to_json(self, default_mapping=None, force_use_builtin_json=False, verbose_level=None, **kwargs):
+        """The differences as JSON; extra keyword arguments go to `json.dumps`."""
+        if default_mapping is not None:
+            raise NotImplementedError("default_mapping is not supported yet.")
+        text = self._native.to_json(self._level(verbose_level))
+        return json.dumps(json.loads(text), **kwargs) if kwargs else text
+
+    @property
+    def affected_paths(self):
+        """The paths of every difference in this result."""
+        return {path for findings in self.values() for path in findings}
+
+    @property
+    def affected_root_keys(self):
+        """The root keys, indices or attribute names the differences sit under."""
+        keys = {_root_key(path) for findings in self._native.to_dict(2).values() for path in findings}
+        keys.discard(_NOT_PRESENT)
+        return keys
+
+    def _level(self, verbose_level):
+        return self.verbose_level if verbose_level is None else _check_verbose_level(verbose_level)

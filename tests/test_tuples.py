@@ -10,7 +10,8 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff, diff_json
+from deepdiff_rs import diff_json
+from conftest import Level2DeepDiff as DeepDiff
 
 
 def test_to_dict_returns_a_tuple_for_an_added_dict_value() -> None:
@@ -35,8 +36,8 @@ def test_to_dict_returns_tuples_for_old_and_new_values_of_a_type_change() -> Non
 
     assert entry["old_value"] == (1, 2)
     assert entry["new_value"] == [1, 2]
-    assert entry["old_type"] == "tuple"
-    assert entry["new_type"] == "list"
+    assert entry["old_type"] is tuple
+    assert entry["new_type"] is list
 
 
 def test_to_dict_returns_a_tuple_for_a_removed_iterable_item() -> None:
@@ -70,8 +71,8 @@ def test_namedtuple_is_accepted_and_diffed_positionally_not_by_field() -> None:
     }
 
     cross_type = DeepDiff(point(1), (1,)).to_dict()["type_changes"]["root"]
-    assert cross_type["old_type"] == "Point"
-    assert cross_type["new_type"] == "tuple"
+    assert cross_type["old_type"] is point
+    assert cross_type["new_type"] is tuple
 
 
 def test_a_tuple_subclass_is_accepted_and_compares_as_a_tuple() -> None:
@@ -94,14 +95,14 @@ def test_a_tuple_subclass_is_accepted_and_compares_as_a_tuple() -> None:
     cross_type = DeepDiff(Pair((1, 2)), (1, 2))
     entry = cross_type.to_dict()["type_changes"]["root"]
     assert entry == {
-        "old_type": "Pair",
-        "new_type": "tuple",
+        "old_type": Pair,
+        "new_type": tuple,
         "old_value": (1, 2),
         "new_value": (1, 2),
     }
 
     nested = DeepDiff({"a": Pair((1, 2))}, {"a": (1, 2)})
-    assert nested.to_dict()["type_changes"]["root['a']"]["old_type"] == "Pair"
+    assert nested.to_dict()["type_changes"]["root['a']"]["old_type"] is Pair
 
     real = RealDeepDiff(Pair((1, 2)), (1, 2), verbose_level=2).to_dict()
     assert real == {

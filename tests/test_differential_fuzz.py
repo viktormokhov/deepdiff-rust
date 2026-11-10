@@ -30,7 +30,7 @@ require_deepdiff()
 from deepdiff import DeepDiff as RealDeepDiff
 from golden_tags import JSON_DEFAULT_MAPPING, canonical_set_order
 
-from deepdiff_rs import DeepDiff as OnixDeepDiff
+from conftest import Level2DeepDiff as OnixDeepDiff
 
 JsonValue = Union[
     dict[str, "JsonValue"],

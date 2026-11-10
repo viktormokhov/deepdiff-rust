@@ -14,7 +14,7 @@ from conftest import require_deepdiff
 
 require_deepdiff()
 
-from deepdiff_rs import DeepDiff as OnixDeepDiff
+from conftest import Level2DeepDiff as OnixDeepDiff
 
 from test_differential_fuzz import (
     JsonValue,

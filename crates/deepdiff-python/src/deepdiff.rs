@@ -6,12 +6,17 @@
 use deepdiff_core::Value;
 use deepdiff_core::diff::Resolution;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyType};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::convert::{
     Held, objects_by_identity, render_report, resolve_token, to_value, token_error,
     value_to_pyobject,
 };
 use crate::guard::{diff_to_value, is_deep, resolve_options, run_on_worker, serialize_value};
+use crate::verbose::at_verbose_level;
 
 /// A drop-in subset of `deepdiff.DeepDiff`, diffing `t1`/`t2` at
 /// `verbose_level=2`. `max_depth` defaults to 512; deeper input raises
@@ -28,6 +33,8 @@ pub(crate) struct DeepDiff {
     /// Whether either input held a lone surrogate code point, found during
     /// conversion; lets `to_json` skip its own WTF-8 tree walk when `false`.
     may_have_wtf8: bool,
+    /// See `crate::convert::Held::types`.
+    types: HashMap<Arc<str>, Py<PyType>>,
 }
 
 #[pymethods]
@@ -107,18 +114,20 @@ impl DeepDiff {
             report_is_deep,
             max_depth: opts.max_depth,
             may_have_wtf8,
+            types: std::mem::take(&mut held.types),
         })
     }
 
-    /// The report as a `DeepDiff`-compatible JSON string at
-    /// `verbose_level=2`; a deep report renders on the sized worker thread
+    /// The report as a `DeepDiff`-compatible JSON string at the given
+    /// `verbose_level`; a deep report renders on the sized worker thread
     /// rather than inline. Differences from `DeepDiff`'s rendering are
     /// documented in the onix repository's `tests/golden/README.md`, 'JSON
     /// supersets' and 'Set iteration order' sections.
-    fn to_json(&self, py: Python<'_>) -> PyResult<String> {
+    #[pyo3(signature = (verbose_level=2))]
+    fn to_json(&self, py: Python<'_>, verbose_level: u8) -> PyResult<String> {
         serialize_value(
             py,
-            &self.report_value,
+            &*self.at_level(py, verbose_level)?,
             self.max_depth,
             self.report_is_deep,
             self.may_have_wtf8,
@@ -128,8 +137,9 @@ impl DeepDiff {
     /// The report as a native Python dict, Python types (tuples, sets,
     /// datetimes) intact. Differences from `DeepDiff`'s `to_dict()`:
     /// `tests/golden/README.md` in the onix repository.
-    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        value_to_pyobject(py, &self.report_value)
+    #[pyo3(signature = (verbose_level=2))]
+    fn to_dict(&self, py: Python<'_>, verbose_level: u8) -> PyResult<Py<PyAny>> {
+        value_to_pyobject(py, &*self.at_level(py, verbose_level)?)
     }
 
     /// `if diff:` truthiness — falsy exactly when `t1`/`t2` had no
@@ -138,8 +148,33 @@ impl DeepDiff {
         !is_empty_report(&self.report_value)
     }
 
+    /// The subclass and custom classes seen in `t1`/`t2`, by `__name__`.
+    #[getter]
+    fn _types<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let types = PyDict::new(py);
+        for (name, class) in &self.types {
+            types.set_item(name.as_ref(), class.bind(py))?;
+        }
+        Ok(types)
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(format!("DeepDiff({})", self.to_json(py)?))
+        Ok(format!("DeepDiff({})", self.to_json(py, 2)?))
+    }
+}
+
+impl DeepDiff {
+    /// The report at `verbose_level`, re-rendered on the sized worker when deep.
+    fn at_level(&self, py: Python<'_>, verbose_level: u8) -> PyResult<Cow<'_, Value>> {
+        if verbose_level >= 2 {
+            return Ok(Cow::Borrowed(&self.report_value));
+        }
+        let render = || at_verbose_level(&self.report_value, verbose_level);
+        Ok(Cow::Owned(if self.report_is_deep {
+            run_on_worker(py, self.max_depth, render)?
+        } else {
+            render()
+        }))
     }
 }
 

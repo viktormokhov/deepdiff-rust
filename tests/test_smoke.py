@@ -9,16 +9,7 @@ from deepdiff_rs import DeepDiff, diff_json
 
 def assert_matches_reference(old, new, **kwargs):
     """Compare Rust implementation against DeepDiff 9.1.0."""
-    actual = DeepDiff(old, new, **kwargs).to_dict()
-
-    reference = ReferenceDeepDiff(
-        old,
-        new,
-        verbose_level=2,
-        **kwargs,
-    ).to_dict()
-
-    assert actual == reference
+    assert DeepDiff(old, new, **kwargs) == ReferenceDeepDiff(old, new, **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -62,7 +53,6 @@ def assert_matches_reference(old, new, **kwargs):
         pytest.param(
             100,
             "100",
-            marks=pytest.mark.xfail(strict=True, reason="to_dict() reports type names, DeepDiff reports type objects"),
             id="type-change",
         ),
         pytest.param(
@@ -73,7 +63,6 @@ def assert_matches_reference(old, new, **kwargs):
         pytest.param(
             {"a": None},
             {"a": 0},
-            marks=pytest.mark.xfail(strict=True, reason="to_dict() reports type names, DeepDiff reports type objects"),
             id="none-to-zero",
         ),
     ],

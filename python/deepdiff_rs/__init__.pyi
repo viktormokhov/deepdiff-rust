@@ -7,24 +7,42 @@ class MaxDepthError(ValueError):
 
 MAX_DEPTH_CEILING: int
 
-class DeepDiff:
-    """A drop-in subset of ``deepdiff.DeepDiff``, diffing ``t1``/``t2`` at ``verbose_level=2``."""
+class DeepDiff(dict[str, Any]):
+    """A drop-in ``deepdiff.DeepDiff``: the differences between ``t1`` and ``t2`` as a dict."""
+
+    t1: Any
+    t2: Any
+    verbose_level: int
 
     def __init__(
         self,
         t1: Any,
         t2: Any,
+        *,
         ignore_order: bool = ...,
         max_depth: int | None = ...,
+        verbose_level: int = ...,
+        view: str = ...,
     ) -> None: ...
-    def to_json(self) -> str:
-        """The report as a ``DeepDiff``-compatible JSON string at ``verbose_level=2``; a deep report renders on the sized worker thread rather than inline."""
+    def to_dict(self, verbose_level: int | None = ...) -> dict[str, Any]:
+        """The differences as a plain dict, with ``type_changes`` types as type objects."""
 
-    def to_dict(self) -> dict[str, Any]:
-        """The report as a native Python dict, Python types (tuples, sets, datetimes) intact."""
+    def to_json(
+        self,
+        default_mapping: dict[type, Any] | None = ...,
+        force_use_builtin_json: bool = ...,
+        verbose_level: int | None = ...,
+        **kwargs: Any,
+    ) -> str:
+        """The differences as JSON; extra keyword arguments go to ``json.dumps``."""
 
-    def __bool__(self) -> bool: ...
-    def __repr__(self) -> str: ...
+    @property
+    def affected_paths(self) -> set[str]:
+        """The paths of every difference in this result."""
+
+    @property
+    def affected_root_keys(self) -> set[Any]:
+        """The root keys, indices or attribute names the differences sit under."""
 
 def diff_json(
     a: str,

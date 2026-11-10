@@ -10,9 +10,19 @@
 ## Current status
 
 This repository contains the forked Onix Python adapter and Rust core. It is
-**not yet a complete drop-in replacement** for DeepDiff: the exposed constructor
-currently supports only the options wired through the upstream adapter
-(`ignore_order` and `max_depth`).
+**not yet a complete drop-in replacement** for DeepDiff.
+
+Implemented, checked against `deepdiff==9.1.0`:
+
+- `DeepDiff` is a `dict` of findings, like the reference result object.
+- `ignore_order`, `max_depth` (an extension DeepDiff lacks), `verbose_level`
+  0/1/2 with the reference default of 1, `view='text'`.
+- `to_dict(verbose_level=...)`, `to_json(verbose_level=..., **json_dumps_kwargs)`,
+  `affected_paths`, `affected_root_keys`, `t1`, `t2`.
+- `type_changes` reports type objects in `to_dict()`, type names in `to_json()`.
+
+Known divergences: report key order follows sorted paths, not traversal
+order; `affected_paths` and `affected_root_keys` are plain `set`s.
 
 Onix implements a useful subset of DeepDiff's core comparison API and converts
 supported live Python objects directly into its native value model. Its documented
@@ -28,7 +38,6 @@ The pinned Onix revision documents these unsupported DeepDiff features:
 - `exclude_paths` and `include_paths`
 - `significant_digits`
 - custom operators
-- `verbose_level != 2`
 - Delta / patch functionality
 - DeepHash and DeepSearch as full compatible modules
 

@@ -19,7 +19,8 @@ require_deepdiff()
 
 from deepdiff import DeepDiff as RealDeepDiff
 
-from deepdiff_rs import DeepDiff, diff_json
+from deepdiff_rs import diff_json
+from conftest import Level2DeepDiff as DeepDiff
 
 # Seeded float corpus size for the repr differential below, and how many are
 # rendered per diff call (one call per batch keeps a million-value run fast).
@@ -87,8 +88,8 @@ def test_to_dict_reports_a_set_versus_frozenset_type_change() -> None:
     """A set-vs-frozenset pairing is a type change carrying both real objects."""
     entry = DeepDiff({1, 2}, frozenset({1, 2})).to_dict()["type_changes"]["root"]
 
-    assert entry["old_type"] == "set"
-    assert entry["new_type"] == "frozenset"
+    assert entry["old_type"] is set
+    assert entry["new_type"] is frozenset
     assert isinstance(entry["old_value"], set)
     assert isinstance(entry["new_value"], frozenset)
 
@@ -302,7 +303,7 @@ def test_a_set_subclass_is_accepted_and_compares_as_a_set() -> None:
 
     cross_type = DeepDiff(MySet({1}), {1})
     entry = cross_type.to_dict()["type_changes"]["root"]
-    assert entry == {"old_type": "MySet", "new_type": "set", "old_value": {1}, "new_value": {1}}
+    assert entry == {"old_type": MySet, "new_type": set, "old_value": {1}, "new_value": {1}}
 
     real = RealDeepDiff(MySet({1}), {1}, verbose_level=2).to_dict()["type_changes"]["root"]
     assert real["old_type"] is MySet
@@ -321,8 +322,8 @@ def test_a_frozenset_subclass_is_accepted_and_compares_as_a_frozenset() -> None:
     cross_type = DeepDiff(MyFrozenSet({1}), frozenset({1}))
     entry = cross_type.to_dict()["type_changes"]["root"]
     assert entry == {
-        "old_type": "MyFrozenSet",
-        "new_type": "frozenset",
+        "old_type": MyFrozenSet,
+        "new_type": frozenset,
         "old_value": frozenset({1}),
         "new_value": frozenset({1}),
     }
@@ -408,7 +409,7 @@ def test_a_set_versus_a_list_is_a_type_change_whatever_the_order() -> None:
     for sibling in ([75, 47], [47, 75]):
         report = DeepDiff([{75, 47}], [sibling], ignore_order=True).to_dict()
 
-        assert report["type_changes"]["root[0]"]["new_type"] == "list", sibling
+        assert report["type_changes"]["root[0]"]["new_type"] is list, sibling
 
 
 def test_a_sets_report_does_not_depend_on_which_member_was_hashed_first() -> None:

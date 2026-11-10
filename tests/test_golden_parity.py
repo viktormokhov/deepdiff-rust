@@ -16,7 +16,7 @@ if sys.version_info < (3, 14):
 from deepdiff import DeepDiff as RealDeepDiff
 from golden_tags import TaggedValue, canonical_report, decode_tags, sorted_set_categories
 
-from deepdiff_rs import DeepDiff as OnixDeepDiff
+from conftest import Level2DeepDiff as OnixDeepDiff
 
 GOLDEN_ROOT = Path(__file__).resolve().parent / "golden"
 

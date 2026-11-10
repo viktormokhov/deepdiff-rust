@@ -2,6 +2,8 @@
 
 import pytest
 
+from deepdiff_rs import DeepDiff
+
 
 def require_deepdiff() -> None:
     """Skip the importing module if real ``deepdiff`` (Python >= 3.10) is unavailable."""
@@ -25,3 +27,11 @@ def _normalize_types(value: object) -> object:
         return value.__name__
 
     return value
+
+
+class Level2DeepDiff(DeepDiff):
+    """``deepdiff_rs.DeepDiff`` at ``verbose_level=2``, the level the Onix-derived tests assume."""
+
+    def __init__(self, t1, t2, **kwargs):
+        kwargs.setdefault("verbose_level", 2)
+        super().__init__(t1, t2, **kwargs)
