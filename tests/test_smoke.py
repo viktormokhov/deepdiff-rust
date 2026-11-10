@@ -1,24 +1,26 @@
 import json
 
-from deepdiff import DeepDiff, diff_json
+from deepdiff import DeepDiff as ReferenceDeepDiff
+from deepdiff_rs import DeepDiff, diff_json
 
 
 def test_deepdiff_import_and_dict_output():
-    result = DeepDiff({"user": {"age": 30}}, {"user": {"age": 31}, "active": True})
+    old = {"user": {"age": 30}}
+    new = {"user": {"age": 31}, "active": True}
+    result = DeepDiff(old, new)
     assert result
-    assert result.to_dict()["values_changed"]["root['user']['age']"] == {
-        "new_value": 31,
-        "old_value": 30,
-    }
-    assert "dictionary_item_added" in result.to_dict()
+    assert result.to_dict() == ReferenceDeepDiff(old, new, verbose_level=2).to_dict()
 
 
 def test_identical_values_are_falsy():
     assert not DeepDiff({"a": [1, 2]}, {"a": [1, 2]})
 
 
-def test_ignore_order():
-    assert not DeepDiff([1, 2, 3], [3, 2, 1], ignore_order=True)
+def test_ignore_order_matches_reference():
+    old, new = [1, 2, 3], [3, 2, 1]
+    assert DeepDiff(old, new, ignore_order=True).to_dict() == (
+        ReferenceDeepDiff(old, new, ignore_order=True, verbose_level=2).to_dict()
+    )
 
 
 def test_json_fast_path():
