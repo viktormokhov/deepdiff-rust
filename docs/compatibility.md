@@ -9,12 +9,13 @@
 
 ## Current status
 
-This repository is an integration scaffold. It is **not yet a drop-in
-replacement** for DeepDiff. The current native implementation only compares
-JSON-compatible values and does not preserve arbitrary Python object
-semantics.
+This repository integrates the pinned Onix Python adapter and Rust core. It is
+**not yet a complete drop-in replacement** for DeepDiff: the exposed constructor
+currently supports only the options wired through the upstream adapter
+(`ignore_order` and `max_depth`).
 
-Onix implements a subset of DeepDiff's core comparison API. Its documented
+Onix implements a useful subset of DeepDiff's core comparison API and converts
+supported live Python objects directly into its native value model. Its documented
 scope includes `None`, booleans, integers, floats, strings, dictionaries,
 lists, tuples, sets, frozensets, Python date/time types, and many custom
 objects by attributes. Unsupported types raise errors rather than being
