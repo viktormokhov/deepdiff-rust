@@ -36,6 +36,8 @@ pub(crate) struct DeepDiff {
     may_have_wtf8: bool,
     /// See `crate::convert::Held::types`.
     types: HashMap<Arc<str>, Py<PyType>>,
+    /// See `crate::convert::Held::instances`.
+    instances: HashMap<usize, Py<PyAny>>,
     /// `get_deep_distance`'s result, `None` when not asked for.
     #[pyo3(get)]
     deep_distance: Option<f64>,
@@ -209,6 +211,7 @@ impl DeepDiff {
             max_depth: opts.max_depth,
             may_have_wtf8,
             types: std::mem::take(&mut held.types),
+            instances: std::mem::take(&mut held.instances),
             deep_distance,
         })
     }
@@ -234,7 +237,12 @@ impl DeepDiff {
     /// `tests/golden/README.md` in the onix repository.
     #[pyo3(signature = (verbose_level=2))]
     fn to_dict(&self, py: Python<'_>, verbose_level: u8) -> PyResult<Py<PyAny>> {
-        value_to_pyobject(py, &*self.at_level(py, verbose_level)?, &self.types)
+        value_to_pyobject(
+            py,
+            &*self.at_level(py, verbose_level)?,
+            &self.types,
+            &self.instances,
+        )
     }
 
     /// `if diff:` truthiness — falsy exactly when `t1`/`t2` had no

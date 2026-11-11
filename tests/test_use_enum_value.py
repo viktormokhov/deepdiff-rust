@@ -23,6 +23,7 @@ class K(enum.Enum):
 
 class S(str, enum.Enum):
     X = "x"
+    Y = "y"
 
 
 class I(enum.IntEnum):
@@ -44,6 +45,8 @@ CASES = [
     ([C.A, 5], [7, C.B], {"ignore_order": True}),
     (S.X, "x", {}),
     (S.X, "y", {}),
+    (S.X, S.Y, {}),
+    (S.X, S.Y, {"use_enum_value": False}),
     (C.A, 1, {"use_enum_value": False}),
     (I.X, I.Y, {}),
     (I.X, 1, {}),

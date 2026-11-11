@@ -559,6 +559,21 @@ def test_custom_object_diffs_by_its_attributes() -> None:
     }
 
 
+def test_custom_object_report_values_are_the_live_instances() -> None:
+    """Whole-object report slots keep the original instances, not attribute dicts."""
+
+    class Custom:
+        def __init__(self, x: int) -> None:
+            self.x = x
+
+    old, new = Custom(1), Custom(2)
+    report = DeepDiff({"a": old}, {"a": 5}, verbose_level=2)
+    assert report["type_changes"]["root['a']"]["old_value"] is old
+    added = DeepDiff({}, {"b": new}, verbose_level=2)
+    assert added["dictionary_item_added"]["root['b']"] is new
+    assert DeepDiff(old, {"x": 1}, verbose_level=2) == RealDeepDiff(old, {"x": 1}, verbose_level=2)
+
+
 def test_two_different_classes_report_a_type_change() -> None:
     """Two instances of different classes are a `type_changes`, named by class."""
 

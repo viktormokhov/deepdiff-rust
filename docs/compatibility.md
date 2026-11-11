@@ -54,11 +54,10 @@ object's `__` attributes.
 keys; `truncate_datetime` leaves `time` values alone (DeepDiff reports
 them as seconds). Numpy integer/floating scalars and `ndarray` (via
 `tolist()`) are supported; `bool_`, `datetime64`, and complex numpy
-scalars are still refused. Pure `Enum` members revive in reports;
-`IntEnum` keeps its class on the numeric path like DeepDiff. A
-`(str, Enum)` pair still diffs as `name`/`value` attributes rather than
-one root `values_changed`. Custom objects may still render as attribute
-dicts. `bytes` dict keys (DeepDiff crashes) and `UUID` dict keys
+scalars are still refused. Pure `Enum` members and custom objects revive as the live
+instances in report values; `IntEnum` keeps its class on the numeric
+path; `(str, Enum)` pairs report one root `values_changed` like
+DeepDiff. `bytes` dict keys (DeepDiff crashes) and `UUID` dict keys
 (DeepDiff reports path `None`) get normal paths. A `Decimal` rounds
 through its nearest `float` under `significant_digits` and
 `math_epsilon`. Identity `t1 is t2` short-circuits to `{}` when

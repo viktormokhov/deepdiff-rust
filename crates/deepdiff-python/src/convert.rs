@@ -471,6 +471,8 @@ fn identity_of(obj: &Bound<'_, PyAny>) -> String {
 pub(crate) struct Held {
     /// Objects whose addresses identities are keyed on, held so no address is reused.
     objects: Vec<Py<PyAny>>,
+    /// Custom / Enum instances by `as_ptr`, so report values revive as the live object.
+    pub(crate) instances: HashMap<usize, Py<PyAny>>,
     /// The objects class-attribute and cycle tokens stand for, by identity.
     resolvable: HashMap<String, Py<PyAny>>,
     pub(crate) cycle_targets: HashSet<String>,
@@ -509,6 +511,7 @@ impl Held {
     pub(crate) fn new(max_depth: usize) -> Self {
         Self {
             objects: Vec::new(),
+            instances: HashMap::new(),
             resolvable: HashMap::new(),
             cycle_targets: HashSet::new(),
             resolved: HashMap::new(),
@@ -528,10 +531,20 @@ impl Held {
     }
 }
 
+/// Keep `obj` alive and index it by pointer for report revive.
+fn hold_instance(held: &mut Held, obj: &Bound<'_, PyAny>) -> usize {
+    let ptr = obj.as_ptr() as usize;
+    held.objects.push(obj.clone().unbind());
+    held.instances
+        .entry(ptr)
+        .or_insert_with(|| obj.clone().unbind());
+    ptr
+}
+
 /// An [`ObjectKind::Opaque`] token for `obj`: equal only to a token for the
 /// same object, and refused by [`render_report`] wherever a report shows it.
 fn opaque(obj: &Bound<'_, PyAny>, builder: &mut Builder, held: &mut Held) -> CValue {
-    held.objects.push(obj.clone().unbind());
+    hold_instance(held, obj);
     held.needs_render = true;
     builder.opaque(class_name(obj, held), Arc::from(identity_of(obj)))
 }
@@ -671,9 +684,8 @@ fn object_step<'py>(
     held.needs_render |= !class_attributes.is_empty();
     let mut class = Box::new(py_class(obj, lengths, held));
     class.class_attributes = class_attributes;
-    class.instance = Some(obj.as_ptr() as usize);
+    class.instance = Some(hold_instance(held, obj));
     class.is_enum = matches!(strategy, Strategy::Enum);
-    held.objects.push(obj.clone().unbind());
     let mut iter = attrs.iter();
     Ok(match next_dict_entry(&mut iter, path, builder)? {
         None => Step::Done(finish_object(
@@ -706,7 +718,7 @@ fn failed_object_step<'py>(
     let identity = identity_of(obj);
     held.failures.entry(identity).or_insert(err);
     held.needs_render = true;
-    held.objects.push(obj.clone().unbind());
+    let instance = hold_instance(held, obj);
     let storage = PyDict::new(py);
     let instance_dict = match obj.getattr("__dict__") {
         Ok(dict) => dict.cast_into::<PyDict>().ok(),
@@ -724,7 +736,7 @@ fn failed_object_step<'py>(
         }
     }
     let mut class = Box::new(py_class(obj, ObjectLengths::default(), held));
-    class.instance = Some(obj.as_ptr() as usize);
+    class.instance = Some(instance);
     let mut iter = storage.iter();
     Ok(match next_dict_entry(&mut iter, path, builder)? {
         None => Step::Done(finish_object(
@@ -1856,6 +1868,7 @@ pub(crate) fn value_to_pyobject(
     py: Python<'_>,
     value: &CValue,
     types: &HashMap<Arc<str>, Py<PyType>>,
+    instances: &HashMap<usize, Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let mut stack: Vec<RenderFrame<'_, '_>> = Vec::new();
     let mut pending: Option<&CValue> = Some(value);
@@ -1892,19 +1905,23 @@ pub(crate) fn value_to_pyobject(
                     start_sequence(py, SeqKind::FrozenSet, items, &mut stack, &mut pending)?
                 }
                 CValue::Object(map) => {
-                    let mut iter = map.iter();
+                    if let Some(revived) = revive_instance(py, map, instances) {
+                        RenderStep::Done(revived)
+                    } else {
+                        let mut iter = map.iter();
 
-                    match iter.next() {
-                        None => RenderStep::Done(PyDict::new(py).into_py_any(py)?),
-                        Some((key, first_value)) => {
-                            stack.push(RenderFrame::Object {
-                                remaining: iter,
-                                built: PyDict::new(py),
-                                current_key: key,
-                                source: map,
-                            });
-                            pending = Some(first_value);
-                            RenderStep::Descend
+                        match iter.next() {
+                            None => RenderStep::Done(PyDict::new(py).into_py_any(py)?),
+                            Some((key, first_value)) => {
+                                stack.push(RenderFrame::Object {
+                                    remaining: iter,
+                                    built: PyDict::new(py),
+                                    current_key: key,
+                                    source: map,
+                                });
+                                pending = Some(first_value);
+                                RenderStep::Descend
+                            }
                         }
                     }
                 }
@@ -1947,7 +1964,10 @@ pub(crate) fn value_to_pyobject(
                 current_key,
                 source,
             }) => {
-                built.set_item(object_key_to_pyobject(py, current_key, types)?, rendered)?;
+                built.set_item(
+                    object_key_to_pyobject(py, current_key, types, instances)?,
+                    rendered,
+                )?;
 
                 match remaining.next() {
                     Some((key, next_value)) => {
@@ -1960,16 +1980,32 @@ pub(crate) fn value_to_pyobject(
                         });
                     }
                     None => {
-                        finished = Some(if source.is_enum() {
-                            revive_enum(py, &built, source, types)?
-                        } else {
-                            built.into_py_any(py)?
-                        });
+                        finished = Some(
+                            if let Some(revived) = revive_instance(py, source, instances) {
+                                revived
+                            } else if source.is_enum() {
+                                revive_enum(py, &built, source, types)?
+                            } else {
+                                built.into_py_any(py)?
+                            },
+                        );
                     }
                 }
             }
         }
     }
+}
+
+/// The live Python object this report value was converted from, if still held.
+fn revive_instance(
+    py: Python<'_>,
+    source: &deepdiff_core::value::Object,
+    instances: &HashMap<usize, Py<PyAny>>,
+) -> Option<Py<PyAny>> {
+    source
+        .instance()
+        .and_then(|ptr| instances.get(&ptr))
+        .map(|obj| obj.clone_ref(py))
 }
 
 /// Rebuild an `Enum` member from its rendered `{name, value}` dict and class.
@@ -2006,10 +2042,11 @@ fn object_key_to_pyobject(
     py: Python<'_>,
     key: &ObjectKey,
     types: &HashMap<Arc<str>, Py<PyType>>,
+    instances: &HashMap<usize, Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     match key {
         ObjectKey::Str(s) => wtf8_to_pyobject(py, s.as_bytes()),
-        ObjectKey::Other(value) => value_to_pyobject(py, value, types),
+        ObjectKey::Other(value) => value_to_pyobject(py, value, types, instances),
     }
 }
 

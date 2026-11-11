@@ -62,7 +62,7 @@ Details and known divergences: [docs/compatibility.md](docs/compatibility.md).
 - `DeepHash` / `hasher`, `DeepSearch`, `Delta` / patch
 - numpy `bool_` / `datetime64` / complex scalars
 - Onix extras we did not port: `diff_tables` (Arrow), `onix` CLI
-- Some custom-object reports still dict-shaped; `(str, Enum)` pairs still walk `name`/`value`
+- Some exotic report shapes for failed/opaque objects may still differ from DeepDiff
 
 ## vs `deepdiff-rs` (Onix) and `deepdiff`
 

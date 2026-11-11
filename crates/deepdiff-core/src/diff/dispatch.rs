@@ -157,7 +157,23 @@ fn object_pair_diff(
     match (a, b) {
         (Value::Object(old), Value::Object(new)) if same_class(a, b) => {
             match (old.failure_token(), new.failure_token()) {
-                (None, None) => object_diff(path, old, new, depth, opts, memo),
+                (None, None) => {
+                    // `(str, Enum)` is a string in DeepDiff: one root values_changed,
+                    // not a walk of `name`/`value` attributes.
+                    if old.is_enum()
+                        && new.is_enum()
+                        && let (Some(Value::Str(ov)), Some(Value::Str(nv))) =
+                            (old.enum_value(), new.enum_value())
+                    {
+                        let equal = if opts.ignore_string_case {
+                            str_case_eq(ov, nv)
+                        } else {
+                            ov == nv
+                        };
+                        return scalar_diff(path, equal, a, b, depth, opts.max_depth);
+                    }
+                    object_diff(path, old, new, depth, opts, memo)
+                }
                 (old_token, new_token) => scalar_diff(
                     path,
                     false,
@@ -323,6 +339,13 @@ fn lowered(value: &Value) -> Value {
             None => value.clone(),
         },
         _ => value.clone(),
+    }
+}
+
+fn str_case_eq(a: &crate::value::Str, b: &crate::value::Str) -> bool {
+    match (a.as_utf8(), b.as_utf8()) {
+        (Some(x), Some(y)) => x.to_lowercase() == y.to_lowercase(),
+        _ => a == b,
     }
 }
 
