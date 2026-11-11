@@ -229,13 +229,29 @@ fn classify<'py>(
         return Ok(Step::Done(CValue::Bool(b.is_true())));
     }
 
+    // Exact builtins (not subclasses / numpy / IntEnum): skip enum+numpy probes.
+    if let Ok(i) = current.cast_exact::<PyInt>() {
+        return Ok(Step::Done(int_to_value(i, path)?));
+    }
+    if let Ok(f) = current.cast_exact::<PyFloat>() {
+        return Ok(Step::Done(float_to_value(f.value())));
+    }
+    if let Ok(s) = current.cast_exact::<PyString>() {
+        return Ok(Step::Done(CValue::Str(pystring_to_cstr(s)?)));
+    }
+
     // Pure `Enum` (not also int/str/float) is an attribute object. `IntEnum` and
     // `(str, Enum)` stay on the number/string paths below so pairs report one
     // root `values_changed` like DeepDiff — but carry the enum class name so
     // report values revive as members, not plain ints/strs.
-    let enum_cls = current.py().import("enum")?.getattr("Enum")?;
-    let is_enum = current.is_instance(&enum_cls)?;
-    if is_enum && current.cast::<PyInt>().is_err() && current.cast::<PyFloat>().is_err()
+    held.ensure_enum_type(current.py())?;
+    let is_enum = {
+        let enum_cls = held.enum_type.as_ref().unwrap().bind(current.py());
+        current.is_instance(enum_cls)?
+    };
+    if is_enum
+        && current.cast::<PyInt>().is_err()
+        && current.cast::<PyFloat>().is_err()
         && current.cast::<PyString>().is_err()
     {
         let strategy = Strategy::Enum;
@@ -247,7 +263,11 @@ fn classify<'py>(
     if let Some(value) = classify_numpy_scalar(current, path, held)? {
         return Ok(Step::Done(value));
     }
-    if !set_member && is_loaded_instance(current, "numpy", "ndarray")? {
+    held.ensure_numpy(current.py())?;
+    if !set_member
+        && let Some(np) = held.numpy.as_ref().unwrap().as_ref()
+        && current.is_instance(np.ndarray.bind(current.py()))?
+    {
         let list = current.call_method0("tolist")?;
         return classify(&list, path, builder, false, held);
     }
@@ -508,6 +528,22 @@ pub(crate) struct Held {
     pub(crate) saw_wtf8: bool,
     pub(crate) needs_render: bool,
     pub(crate) needs_worker: bool,
+    /// Cached `enum.Enum` type object for the diff (avoids re-import per leaf).
+    enum_type: Option<Py<PyAny>>,
+    /// Cached numpy types when `numpy` is already imported; `None` = not probed yet,
+    /// `Some(None)` = numpy absent, `Some(Some(_))` = loaded handles.
+    numpy: Option<Option<NumpyTypes>>,
+}
+
+/// Numpy type handles reused across every leaf of one diff.
+struct NumpyTypes {
+    generic: Py<PyAny>,
+    bool_: Py<PyAny>,
+    datetime64: Py<PyAny>,
+    floating: Py<PyAny>,
+    integer: Py<PyAny>,
+    complexfloating: Py<PyAny>,
+    ndarray: Py<PyAny>,
 }
 
 impl Held {
@@ -539,10 +575,38 @@ impl Held {
             saw_wtf8: false,
             needs_render: false,
             needs_worker: false,
+            enum_type: None,
+            numpy: None,
         }
     }
-}
 
+    fn ensure_enum_type(&mut self, py: Python<'_>) -> PyResult<()> {
+        if self.enum_type.is_none() {
+            self.enum_type = Some(py.import("enum")?.getattr("Enum")?.unbind());
+        }
+        Ok(())
+    }
+
+    fn ensure_numpy(&mut self, py: Python<'_>) -> PyResult<()> {
+        if self.numpy.is_none() {
+            let modules = py.import("sys")?.getattr("modules")?;
+            let loaded = match modules.cast::<PyDict>()?.get_item("numpy")? {
+                Some(module) => Some(NumpyTypes {
+                    generic: module.getattr("generic")?.unbind(),
+                    bool_: module.getattr("bool_")?.unbind(),
+                    datetime64: module.getattr("datetime64")?.unbind(),
+                    floating: module.getattr("floating")?.unbind(),
+                    integer: module.getattr("integer")?.unbind(),
+                    complexfloating: module.getattr("complexfloating")?.unbind(),
+                    ndarray: module.getattr("ndarray")?.unbind(),
+                }),
+                None => None,
+            };
+            self.numpy = Some(loaded);
+        }
+        Ok(())
+    }
+}
 /// Keep `obj` alive and index it by pointer for report revive.
 fn hold_instance(held: &mut Held, obj: &Bound<'_, PyAny>) -> usize {
     let ptr = obj.as_ptr() as usize;
@@ -631,17 +695,24 @@ fn classify_numpy_scalar(
     path: &[PathSegment],
     held: &mut Held,
 ) -> PyResult<Option<CValue>> {
-    if !is_loaded_instance(current, "numpy", "generic")? {
+    held.ensure_numpy(current.py())?;
+    let Some(np) = held.numpy.as_ref().unwrap().as_ref() else {
+        return Ok(None);
+    };
+    let py = current.py();
+    if !current.is_instance(np.generic.bind(py))? {
         return Ok(None);
     }
+    // Re-borrow after class_name may mutate held.types — fetch handles again.
     let class = class_name(current, held);
-    if is_loaded_instance(current, "numpy", "bool_")? {
+    let np = held.numpy.as_ref().unwrap().as_ref().unwrap();
+    if current.is_instance(np.bool_.bind(py))? {
         let bit = if current.is_truthy()? { 1 } else { 0 };
         return Ok(Some(CValue::Number(
             CNumber::from_u64(bit).with_type_name(Some(class)),
         )));
     }
-    if is_loaded_instance(current, "numpy", "datetime64")? {
+    if current.is_instance(np.datetime64.bind(py))? {
         let item = current.call_method0("item")?;
         if let Some(value) = classify_temporal(&item, path, held)? {
             return Ok(Some(with_type_name(value, class)));
@@ -649,22 +720,22 @@ fn classify_numpy_scalar(
         return Ok(None);
     }
     // Prefer float: `np.float64` also answers to integer casts via Python.
-    if is_loaded_instance(current, "numpy", "floating")? {
+    if current.is_instance(np.floating.bind(py))? {
         let f: f64 = current.extract()?;
         return Ok(Some(CValue::Number(
             CNumber::from_f64(f).with_type_name(Some(class)),
         )));
     }
-    if is_loaded_instance(current, "numpy", "integer")? {
-        let as_int = current.py().get_type::<PyInt>().call1((current,))?;
+    if current.is_instance(np.integer.bind(py))? {
+        let as_int = py.get_type::<PyInt>().call1((current,))?;
         let number = int_to_value(as_int.cast::<PyInt>()?, path)?;
         return Ok(Some(match &number {
             CValue::Number(n) => CValue::Number(n.clone().with_type_name(Some(class))),
             _ => number,
         }));
     }
-    if is_loaded_instance(current, "numpy", "complexfloating")? {
-        let as_complex = current.py().get_type::<PyComplex>().call1((current,))?;
+    if current.is_instance(np.complexfloating.bind(py))? {
+        let as_complex = py.get_type::<PyComplex>().call1((current,))?;
         let c = as_complex.cast::<PyComplex>()?;
         return Ok(Some(CValue::Leaf(Typed::with_class_name(
             Box::new(Leaf::Complex(c.real(), c.imag())),
@@ -673,7 +744,6 @@ fn classify_numpy_scalar(
     }
     Ok(None)
 }
-
 /// Attach a non-base class name onto a temporal / leaf value.
 fn with_type_name(value: CValue, class: Arc<str>) -> CValue {
     match &value {
