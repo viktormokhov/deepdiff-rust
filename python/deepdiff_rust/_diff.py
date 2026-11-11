@@ -7,6 +7,7 @@ import json
 import uuid
 
 from . import _native
+from ._callbacks import callbacks_active
 from ._group_by import group_pair
 from ._options import native_options
 from ._paths import skip_filter
@@ -61,7 +62,9 @@ class DeepDiff(dict):
         threshold_to_diff_deeper=0.33, cutoff_distance_for_pairs=0.3,
         cutoff_intersection_for_pairs=0.7, zip_ordered_iterables=False, get_deep_distance=False,
         group_by=None, group_by_sort_key=None, report_repetition=False, max_diffs=None,
-        max_passes=10000000,
+        max_passes=10000000, custom_operators=None, exclude_obj_callback=None,
+        exclude_obj_callback_strict=None, include_obj_callback=None,
+        include_obj_callback_strict=None, iterable_compare_func=None,
     ):
         if view != "text":
             raise NotImplementedError(f"view={view!r} is not supported yet; only view='text' is.")
@@ -71,6 +74,20 @@ class DeepDiff(dict):
         t1, t2 = group_pair(t1, t2, group_by, group_by_sort_key)
         self.t1 = t1
         self.t2 = t2
+        self.custom_operators = custom_operators or []
+        self.exclude_obj_callback = exclude_obj_callback
+        self.exclude_obj_callback_strict = exclude_obj_callback_strict
+        self.include_obj_callback = include_obj_callback
+        self.include_obj_callback_strict = include_obj_callback_strict
+        self.iterable_compare_func = iterable_compare_func
+        self._callbacks_active = callbacks_active(
+            custom_operators=custom_operators,
+            exclude_obj_callback=exclude_obj_callback,
+            exclude_obj_callback_strict=exclude_obj_callback_strict,
+            include_obj_callback=include_obj_callback,
+            include_obj_callback_strict=include_obj_callback_strict,
+            iterable_compare_func=iterable_compare_func,
+        )
         exclude_types = tuple(exclude_types) if exclude_types else None
         skip = skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types)
         self._native = _native.DeepDiff(

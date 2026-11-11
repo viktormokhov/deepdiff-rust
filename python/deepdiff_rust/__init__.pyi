@@ -54,6 +54,12 @@ class DeepDiff(dict[str, Any]):
         report_repetition: bool = ...,
         max_diffs: int | None = ...,
         max_passes: int = ...,
+        custom_operators: list[Any] | None = ...,
+        exclude_obj_callback: Any | None = ...,
+        exclude_obj_callback_strict: Any | None = ...,
+        include_obj_callback: Any | None = ...,
+        include_obj_callback_strict: Any | None = ...,
+        iterable_compare_func: Any | None = ...,
     ) -> None: ...
     def to_dict(self, verbose_level: int | None = ...) -> dict[str, Any]:
         """The differences as a plain dict, with ``type_changes`` types as type objects."""
