@@ -49,6 +49,30 @@ class DeltaNumpyOperatorOverrideError(ValueError):
     """Raised when numpy's `+` would reverse operand order incorrectly."""
 
 
+def _deserialize_diff(payload, deserializer, safe_to_import):
+    """Turn a str/bytes delta payload into a mapping via ``deserializer``."""
+    if deserializer is None:
+        raise NotImplementedError(
+            "string/bytes diff requires deserializer=... "
+            "(pickle default is not bundled; pass json.loads or another callable)"
+        )
+    # DeepDiff's pickle_load accepts safe_to_import=; json.loads does not.
+    accepts_safe = False
+    code = getattr(deserializer, "__code__", None)
+    if code is not None and "safe_to_import" in code.co_varnames:
+        accepts_safe = True
+    result = (
+        deserializer(payload, safe_to_import=safe_to_import)
+        if accepts_safe
+        else deserializer(payload)
+    )
+    if not isinstance(result, Mapping):
+        raise TypeError(
+            f"deserializer must return a mapping, got {type(result).__name__}"
+        )
+    return result
+
+
 def report_to_delta_dict(report, *, directed=True, always_include_values=False, ignore_order=False):
     """Reshape a text DeepDiff report into a Delta-compatible dictionary."""
     result = deepcopy(dict(report))
@@ -135,8 +159,6 @@ class Delta:
             raise NotImplementedError(
                 "delta_path/delta_file/flat_dict_list/flat_rows_list are not supported yet"
             )
-        if deserializer is not None or serializer is not None:
-            raise NotImplementedError("custom serializer/deserializer are not supported yet")
 
         if verify_symmetry is not None:
             logger.warning(
@@ -151,6 +173,8 @@ class Delta:
         self.log_errors = log_errors
         self.force = force
         self.fill = fill
+        self.deserializer = deserializer
+        self.serializer = serializer
         self._reversed_diff = None
         self.post_process_paths_to_convert = {}
         self.get_nested_obj = get_nested_obj_and_force if force else get_nested_obj
@@ -163,9 +187,10 @@ class Delta:
                     always_include_values=self.always_include_values,
                 )
             elif isinstance(diff, Mapping):
+                # Mapping payloads ignore deserializer (DeepDiff behavior).
                 self.diff = dict(diff)
             elif isinstance(diff, (str, bytes)):
-                raise NotImplementedError("pickle/string delta payloads are not supported yet")
+                self.diff = dict(_deserialize_diff(diff, deserializer, safe_to_import))
             else:
                 raise TypeError(f"unsupported diff type: {type(diff).__name__}")
         elif delta_diff is not None:
@@ -189,6 +214,23 @@ class Delta:
 
     def to_dict(self):
         return dict(self.diff)
+
+    def dumps(self):
+        """Serialize this delta with the configured `serializer` (if any)."""
+        if self.serializer is None:
+            raise NotImplementedError(
+                "dumps() requires serializer=... at Delta creation "
+                "(pickle default is not bundled; pass json.dumps or another callable)"
+            )
+        return self.serializer(self.diff)
+
+    def dump(self, file):
+        """Write a serialized delta to a file object."""
+        payload = self.dumps()
+        if isinstance(payload, str):
+            file.write(payload)
+        else:
+            file.write(payload)
 
     def _raise_or_log(self, msg, level="error"):
         if self.log_errors:

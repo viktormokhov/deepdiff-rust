@@ -21,7 +21,9 @@ assert extract({"a": [1, 2]}, "root['a'][1]") == 2
   (strip `old_value` when directed; normalize `set_item_*` path lists →
   `{parent_path: {member, ...}}`).
 - Apply order matches DeepDiff 9.1.0 for supported categories.
-- Unsupported constructors (pickle/file/flat): `NotImplementedError`.
+- `deserializer=` / `serializer=` callables supported (e.g. `json.loads` /
+  `json.dumps`). Mapping `diff` ignores deserializer. str/bytes `diff` requires
+  deserializer. Pickle default / file / flat still `NotImplementedError`.
 
 ## Out of scope
 

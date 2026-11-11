@@ -76,6 +76,26 @@ def test_ignore_order_without_report_repetition_is_refused():
         Delta(DeepDiff([1, 2], [2, 1], ignore_order=True))
 
 
-def test_pickle_inputs_are_refused():
-    with pytest.raises(NotImplementedError):
-        Delta(diff=b"not-a-real-pickle")
+def test_json_deserializer_loads_string_payload():
+    import json
+
+    t1, t2 = {"a": 1, "b": [1, 2]}, {"a": 2, "b": [1, 3], "c": 9}
+    payload = json.dumps(Delta(DeepDiff(t1, t2, verbose_level=2)).to_dict())
+    # Mapping path: deserializer is accepted and ignored (DeepDiff-compatible).
+    as_map = Delta(json.loads(payload), deserializer=json.loads, log_errors=False)
+    assert as_map.to_dict() == json.loads(payload)
+    # String path: deserializer is required and applied.
+    from_str = Delta(payload, deserializer=json.loads, log_errors=False)
+    assert t1 + from_str == t2
+
+
+def test_string_diff_without_deserializer_is_refused():
+    with pytest.raises(NotImplementedError, match="deserializer"):
+        Delta(diff='{"values_changed":{}}')
+
+
+def test_dumps_with_json_serializer():
+    import json
+
+    delta = Delta(DeepDiff({"a": 1}, {"a": 2}), serializer=json.dumps)
+    assert json.loads(delta.dumps()) == delta.to_dict()

@@ -10,7 +10,7 @@ toward `deepdiff==9.1.0` parity for the comparison API.
 | Import | `deepdiff_rust` (does not shadow `deepdiff` / `deepdiff-rs`) |
 | Runtime deps | none |
 | Python | CPython 3.10+ (abi3 wheels) |
-| Version | 0.1.4 |
+| Version | 0.1.5 |
 
 ```python
 from deepdiff_rust import DeepDiff
@@ -60,7 +60,7 @@ Known divergences: [docs/compatibility.md](docs/compatibility.md).
 ### Not yet
 
 - `DeepHash` / `hasher`, `DeepSearch`
-- Delta pickle / flat_dicts / flat_rows / file loaders
+- Delta pickle default / flat_dicts / flat_rows / file loaders (pass `deserializer=` / `serializer=` for JSON)
 - Onix extras not ported: `diff_tables` (Arrow), `onix` CLI
 - Some exotic report shapes for opaque/failed objects may still differ
 

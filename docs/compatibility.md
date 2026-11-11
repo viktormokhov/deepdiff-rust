@@ -80,7 +80,8 @@ silently coerced.
 The pinned Onix revision documents these unsupported DeepDiff features:
 
 - custom operators
-- Delta pickle / flat serialization (apply + `to_dict` + `extract` are implemented)
+- Delta pickle default / flat serialization (apply + `to_dict` + `extract` +
+  `deserializer=`/`serializer=` callables such as `json.loads`/`json.dumps` are implemented)
 - DeepHash and DeepSearch as full compatible modules
 
 Additional semantic differences and resource limits are documented in
