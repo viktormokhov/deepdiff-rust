@@ -12,6 +12,7 @@ from ._dual import run_dual
 from ._group_by import group_pair
 from ._options import native_options
 from ._paths import skip_filter
+from ._delta import report_to_delta_dict
 from ._view import build_tree, pretty_from_tree, tree_as_result
 
 _BUILTIN_TYPES = {
@@ -98,6 +99,9 @@ class DeepDiff(dict):
             )
         self.view = view
         self.verbose_level = _check_verbose_level(verbose_level)
+        self.ignore_order = ignore_order
+        self.report_repetition = report_repetition
+        self.group_by = group_by
         if not 0 <= float(cutoff_distance_for_pairs) <= 1:
             raise ValueError("cutoff_distance_for_pairs needs to be a positive float max 1.")
         if t1 is t2 and group_by is None:
@@ -197,6 +201,26 @@ class DeepDiff(dict):
             super().__init__(tree_as_result(self.tree))
         else:
             super().__init__(text)
+
+    def _to_delta_dict(self, directed=True, always_include_values=False, report_repetition_required=True):
+        if self.group_by is not None:
+            raise ValueError(
+                "Delta does not support group_by; recreate the DeepDiff without group_by."
+            )
+        if (
+            report_repetition_required
+            and self.ignore_order
+            and not self.report_repetition
+        ):
+            raise ValueError(
+                "When ignore_order is True, report_repetition must also be True for Delta."
+            )
+        return report_to_delta_dict(
+            self.to_dict(verbose_level=2),
+            directed=directed,
+            always_include_values=always_include_values,
+            ignore_order=self.ignore_order,
+        )
 
     def to_dict(self, verbose_level=None):
         if self._native is None:

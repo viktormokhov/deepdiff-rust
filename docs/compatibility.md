@@ -80,7 +80,7 @@ silently coerced.
 The pinned Onix revision documents these unsupported DeepDiff features:
 
 - custom operators
-- Delta / patch functionality
+- Delta pickle / flat serialization (apply + `to_dict` + `extract` are implemented)
 - DeepHash and DeepSearch as full compatible modules
 
 Additional semantic differences and resource limits are documented in

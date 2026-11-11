@@ -72,6 +72,42 @@ class DeepDiff(dict[str, Any]):
     @property
     def affected_root_keys(self) -> set[Any]: ...
     def pretty(self, prefix: Any = ...) -> str: ...
+    def _to_delta_dict(
+        self,
+        directed: bool = ...,
+        always_include_values: bool = ...,
+        report_repetition_required: bool = ...,
+    ) -> dict[str, Any]: ...
+
+class DeltaError(ValueError):
+    """Delta-specific errors."""
+
+class DeltaNumpyOperatorOverrideError(ValueError):
+    """Raised when numpy's ``+`` would reverse operand order incorrectly."""
+
+class Delta:
+    diff: dict[str, Any]
+    def __init__(
+        self,
+        diff: Any = ...,
+        *,
+        delta_diff: dict[str, Any] | None = ...,
+        mutate: bool = ...,
+        raise_errors: bool = ...,
+        log_errors: bool = ...,
+        bidirectional: bool = ...,
+        always_include_values: bool = ...,
+        force: bool = ...,
+        fill: Any = ...,
+        verify_symmetry: bool | None = ...,
+    ) -> None: ...
+    def to_dict(self) -> dict[str, Any]: ...
+    def __add__(self, other: Any) -> Any: ...
+    def __radd__(self, other: Any) -> Any: ...
+    def __rsub__(self, other: Any) -> Any: ...
+
+def extract(obj: Any, path: str) -> Any:
+    """Return the value at a DeepDiff-style path (``root[...]``)."""
 
 def diff_json(
     a: str,
