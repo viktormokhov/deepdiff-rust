@@ -7,7 +7,7 @@ import json
 import uuid
 
 from . import _native
-from ._callbacks import callbacks_active
+from ._callbacks import callbacks_active, compose_skip
 from ._group_by import group_pair
 from ._options import native_options
 from ._paths import skip_filter
@@ -90,6 +90,13 @@ class DeepDiff(dict):
         )
         exclude_types = tuple(exclude_types) if exclude_types else None
         skip = skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types)
+        skip = compose_skip(
+            skip, t1, t2,
+            exclude_obj_callback=exclude_obj_callback,
+            exclude_obj_callback_strict=exclude_obj_callback_strict,
+            include_obj_callback=include_obj_callback,
+            include_obj_callback_strict=include_obj_callback_strict,
+        )
         self._native = _native.DeepDiff(
             t1, t2, ignore_order=ignore_order, max_depth=max_depth, exclude_types=exclude_types,
             ignore_private_variables=ignore_private_variables, skip=skip, use_enum_value=use_enum_value,
