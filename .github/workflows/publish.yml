@@ -108,19 +108,21 @@ jobs:
           path: dist
       - name: List artifacts
         run: ls -la dist
+      # maturin upload is deprecated and maturin-action mangles
+      # `--repository-url URL dist/*` (URL becomes the first wheel path).
       - name: Publish to TestPyPI
         if: inputs.target == 'testpypi'
-        uses: PyO3/maturin-action@v1
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        with:
-          command: upload
-          args: --non-interactive --skip-existing --repository-url https://test.pypi.org/legacy/ dist/*
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: |
+          pip install -U twine
+          twine upload --repository-url https://test.pypi.org/legacy/ --skip-existing dist/*
       - name: Publish to PyPI
         if: startsWith(github.ref, 'refs/tags/') || inputs.target == 'pypi'
-        uses: PyO3/maturin-action@v1
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          pip install -U twine
+          twine upload --skip-existing dist/*
