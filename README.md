@@ -104,25 +104,48 @@ pytest -q
 
 ## Publishing to PyPI
 
-GitHub Actions workflow [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
-builds abi3 wheels (Linux x86_64/aarch64, Windows x64, macOS Intel/ARM) plus an
-sdist and uploads them when you push a version tag.
+Workflow [`.github/workflows/publish.yml`](.github/workflows/publish.yml) builds
+abi3 wheels (Linux x86_64/aarch64, Windows x64, macOS Intel/ARM) plus an sdist.
 
-1. Create a PyPI account and an API token.
-2. In the GitHub repo: **Settings → Secrets and variables → Actions** → add
-   `PYPI_API_TOKEN` (the raw token; maturin sends it as the password with user
-   `__token__`).
-3. Tag and push (version in `pyproject.toml` / workspace must match the tag
-   without the leading `v`):
+### Secrets (GitHub → Settings → Secrets and variables → Actions)
+
+| Secret | Purpose |
+|---|---|
+| `TEST_PYPI_API_TOKEN` | Upload to https://test.pypi.org |
+| `PYPI_API_TOKEN` | Upload to https://pypi.org |
+
+Create tokens on TestPyPI / PyPI (Account → API tokens). Store the raw token
+value; maturin authenticates as user `__token__`.
+
+### Dry run on TestPyPI
+
+1. Register on https://test.pypi.org and create a token → secret
+   `TEST_PYPI_API_TOKEN`.
+2. **Actions → Publish → Run workflow** → target `testpypi`.
+3. Install and smoke-test:
+
+```bash
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ deepdiff-rust==0.1.0
+python -c "from deepdiff_rust import DeepDiff; print(DeepDiff({'a':1},{'a':2}))"
+```
+
+(`--extra-index-url` is only needed if a future release gains PyPI dependencies.)
+
+### Production release
+
+1. Version in `pyproject.toml` and `[workspace.package]` must match the tag
+   without the leading `v` (e.g. `0.1.0` ↔ `v0.1.0`).
+2. Push the tag (or run the workflow with target `pypi`):
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Optional: **Actions → Publish → Run workflow** with `publish=true` for a
-manual upload. Prefer TestPyPI first if you want a dry run (point a separate
-token / workflow at test.pypi.org).
+3. After the job finishes: `pip install deepdiff-rust`.
+
+A version string can be uploaded to PyPI only once — fix mistakes with a new
+version number.
 
 ## Third-party code
 
