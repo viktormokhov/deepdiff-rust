@@ -79,11 +79,11 @@ Keep stock `deepdiff` only if you need it as a reference oracle or for tests.
 
 ## Layout
 
-- `crates/deepdiff-core` — comparison engine
-- `crates/deepdiff-python` — PyO3 extension (`deepdiff_rust._native`)
-- `python/deepdiff_rust` — public Python API
-- `tests` — API + differential tests vs `deepdiff==9.1.0`
-- `docs/` — compatibility notes
+- `crates/deepdiff-core` â€” comparison engine
+- `crates/deepdiff-python` â€” PyO3 extension (`deepdiff_rust._native`)
+- `python/deepdiff_rust` â€” public Python API
+- `tests` â€” API + differential tests vs `deepdiff==9.1.0`
+- `docs/` â€” compatibility notes
 
 ## Development
 
@@ -103,10 +103,10 @@ pytest -q
 Bump `version` in `pyproject.toml` and `[workspace.package]`, then tag
 `vX.Y.Z` and push. [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
 builds abi3 wheels (Linux x86_64/aarch64, Windows x64, macOS Intel/ARM) + sdist
-and uploads to PyPI. Manual dry-run: Actions > Publish > `testpypi`.
+and uploads to PyPI. Manual dry-run: Actions â†’ Publish â†’ `testpypi`.
 
 ## Third-party / license
 
 MIT. Comparison engine and Python conversion modules are forked from Onix,
-Copyright (c) 2026 Rodrigo Carvajal, MIT — see
+Copyright (c) 2026 Rodrigo Carvajal, MIT â€” see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [LICENSE-ONIX](LICENSE-ONIX).
