@@ -217,15 +217,66 @@ fn classify<'py>(
         return Ok(Step::Done(CValue::Bool(b.is_true())));
     }
 
+    // Pure `Enum` (not also int/str/float) is an attribute object. `IntEnum` and
+    // `(str, Enum)` stay on the number/string paths below so pairs report one
+    // root `values_changed` like DeepDiff — but carry the enum class name so
+    // report values revive as members, not plain ints/strs.
+    let enum_cls = current.py().import("enum")?.getattr("Enum")?;
+    let is_enum = current.is_instance(&enum_cls)?;
+    if is_enum && current.cast::<PyInt>().is_err() && current.cast::<PyFloat>().is_err()
+        && current.cast::<PyString>().is_err()
+    {
+        let strategy = Strategy::Enum;
+        return object_step(current, &strategy, path, builder, held);
+    }
+
+    // Numpy scalars before PyInt/PyFloat: `np.float64` looks like a float but
+    // DeepDiff still reports a `type_changes` against a plain Python float.
+    if let Some(value) = classify_numpy_scalar(current, path, held)? {
+        return Ok(Step::Done(value));
+    }
+    if !set_member && is_loaded_instance(current, "numpy", "ndarray")? {
+        let list = current.call_method0("tolist")?;
+        return classify(&list, path, builder, false, held);
+    }
+
     if let Ok(i) = current.cast::<PyInt>() {
-        return Ok(Step::Done(int_to_value(i, path)?));
+        let mut value = int_to_value(i, path)?;
+        if is_enum {
+            let class = class_name(current, held);
+            if let CValue::Number(n) = &value {
+                value = CValue::Number(
+                    n.clone()
+                        .with_type_name(Some(class))
+                        .with_from_enum(true),
+                );
+            }
+        }
+        return Ok(Step::Done(value));
     }
 
     if let Ok(f) = current.cast::<PyFloat>() {
-        return Ok(Step::Done(float_to_value(f.value())));
+        let mut value = float_to_value(f.value());
+        if is_enum {
+            let class = class_name(current, held);
+            if let CValue::Number(n) = &value {
+                value = CValue::Number(
+                    n.clone()
+                        .with_type_name(Some(class))
+                        .with_from_enum(true),
+                );
+            }
+        }
+        return Ok(Step::Done(value));
     }
 
     if let Ok(s) = current.cast::<PyString>() {
+        // `(str, Enum)`: keep the member via a one-field enum object so report
+        // values and type_changes revive as the enum, matching DeepDiff.
+        if is_enum {
+            let strategy = Strategy::Enum;
+            return object_step(current, &strategy, path, builder, held);
+        }
         return Ok(Step::Done(CValue::Str(pystring_to_cstr(s)?)));
     }
 
@@ -509,9 +560,13 @@ fn object_strategy<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Option<Strategy<'py
         || obj.is_instance(&py.import("fractions")?.getattr("Fraction")?)?
         || obj.is_instance(&py.import("uuid")?.getattr("UUID")?)?
         || is_ipaddress(obj)?
-        || is_loaded_instance(obj, "numpy", "generic")?
         || is_loaded_instance(obj, "pydantic.main", "BaseModel")?
     {
+        return Ok(None);
+    }
+    // Numpy arrays are handled in `classify` via `tolist()`; leave other
+    // numpy containers opaque here.
+    if is_loaded_instance(obj, "numpy", "ndarray")? {
         return Ok(None);
     }
     if obj.is_instance(&py.import("collections.abc")?.getattr("Iterable")?)? {
@@ -543,6 +598,37 @@ fn is_loaded_instance(obj: &Bound<'_, PyAny>, module: &str, class: &str) -> PyRe
         Some(module) => obj.is_instance(&module.getattr(class)?),
         None => Ok(false),
     }
+}
+
+/// Numpy scalar → [`CValue::Number`] with the numpy class `__name__`.
+fn classify_numpy_scalar(
+    current: &Bound<'_, PyAny>,
+    path: &[PathSegment],
+    held: &mut Held,
+) -> PyResult<Option<CValue>> {
+    if !is_loaded_instance(current, "numpy", "generic")? {
+        return Ok(None);
+    }
+    let name = type_name(current);
+    let class = class_name(current, held);
+    // Prefer float: `np.float64` also answers to integer casts via Python.
+    if is_loaded_instance(current, "numpy", "floating")? {
+        let f: f64 = current.extract()?;
+        return Ok(Some(CValue::Number(
+            CNumber::from_f64(f).with_type_name(Some(class)),
+        )));
+    }
+    if is_loaded_instance(current, "numpy", "integer")? {
+        let as_int = current.py().get_type::<PyInt>().call1((current,))?;
+        let number = int_to_value(as_int.cast::<PyInt>()?, path)?;
+        return Ok(Some(match &number {
+            CValue::Number(n) => CValue::Number(n.clone().with_type_name(Some(class))),
+            _ => number,
+        }));
+    }
+    // Other numpy.generic (e.g. complexfloating): leave for opaque/error paths.
+    let _ = name;
+    Ok(None)
 }
 
 /// Whether `obj` is an `ipaddress` address, network, or interface — the types
@@ -1758,6 +1844,7 @@ enum RenderFrame<'py, 'v> {
         remaining: Entries<'v>,
         built: Bound<'py, PyDict>,
         current_key: &'v ObjectKey,
+        source: &'v deepdiff_core::value::Object,
     },
 }
 
@@ -1765,7 +1852,11 @@ enum RenderFrame<'py, 'v> {
 /// object [`crate::deepdiff::DeepDiff::to_dict`] returns, with an explicit
 /// stack. The report is a `Value`, not JSON, so a `tuple` comes back as a
 /// `tuple`.
-pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<PyAny>> {
+pub(crate) fn value_to_pyobject(
+    py: Python<'_>,
+    value: &CValue,
+    types: &HashMap<Arc<str>, Py<PyType>>,
+) -> PyResult<Py<PyAny>> {
     let mut stack: Vec<RenderFrame<'_, '_>> = Vec::new();
     let mut pending: Option<&CValue> = Some(value);
     let mut finished: Option<Py<PyAny>> = None;
@@ -1775,7 +1866,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
             let step = match current {
                 CValue::Null => RenderStep::Done(py.None()),
                 CValue::Bool(b) => RenderStep::Done(b.into_py_any(py)?),
-                CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n)?),
+                CValue::Number(n) => RenderStep::Done(number_to_pyobject(py, n, types)?),
                 CValue::Str(s) => RenderStep::Done(wtf8_to_pyobject(py, s.as_bytes())?),
                 // Renders back as the plain base type, never the subclass instance:
                 // docs/design/value-conversion.md's "Subclasses" section.
@@ -1810,6 +1901,7 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                                 remaining: iter,
                                 built: PyDict::new(py),
                                 current_key: key,
+                                source: map,
                             });
                             pending = Some(first_value);
                             RenderStep::Descend
@@ -1853,8 +1945,9 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                 mut remaining,
                 built,
                 current_key,
+                source,
             }) => {
-                built.set_item(object_key_to_pyobject(py, current_key)?, rendered)?;
+                built.set_item(object_key_to_pyobject(py, current_key, types)?, rendered)?;
 
                 match remaining.next() {
                     Some((key, next_value)) => {
@@ -1863,10 +1956,45 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
                             remaining,
                             built,
                             current_key: key,
+                            source,
                         });
                     }
-                    None => finished = Some(built.into_py_any(py)?),
+                    None => {
+                        finished = Some(if source.is_enum() {
+                            revive_enum(py, &built, source, types)?
+                        } else {
+                            built.into_py_any(py)?
+                        });
+                    }
                 }
+            }
+        }
+    }
+}
+
+/// Rebuild an `Enum` member from its rendered `{name, value}` dict and class.
+fn revive_enum(
+    py: Python<'_>,
+    built: &Bound<'_, PyDict>,
+    source: &deepdiff_core::value::Object,
+    types: &HashMap<Arc<str>, Py<PyType>>,
+) -> PyResult<Py<PyAny>> {
+    let Some(class_name) = source.type_name() else {
+        return built.clone().into_py_any(py);
+    };
+    let Some(class) = types.get(class_name) else {
+        return built.clone().into_py_any(py);
+    };
+    let Some(name) = built.get_item("name")? else {
+        return built.clone().into_py_any(py);
+    };
+    match class.bind(py).call_method1("__getitem__", (name.clone(),)) {
+        Ok(member) => member.into_py_any(py),
+        Err(_) => {
+            let name_str: String = name.extract()?;
+            match class.bind(py).getattr(name_str.as_str()) {
+                Ok(member) => member.into_py_any(py),
+                Err(_) => built.clone().into_py_any(py),
             }
         }
     }
@@ -1874,10 +2002,14 @@ pub(crate) fn value_to_pyobject(py: Python<'_>, value: &CValue) -> PyResult<Py<P
 
 /// Rebuilds one [`ObjectKey`] as a Python dict key. A non-`str` key is at most
 /// a flat tuple, so the recursion is two levels.
-fn object_key_to_pyobject(py: Python<'_>, key: &ObjectKey) -> PyResult<Py<PyAny>> {
+fn object_key_to_pyobject(
+    py: Python<'_>,
+    key: &ObjectKey,
+    types: &HashMap<Arc<str>, Py<PyType>>,
+) -> PyResult<Py<PyAny>> {
     match key {
         ObjectKey::Str(s) => wtf8_to_pyobject(py, s.as_bytes()),
-        ObjectKey::Other(value) => value_to_pyobject(py, value),
+        ObjectKey::Other(value) => value_to_pyobject(py, value, types),
     }
 }
 
@@ -1982,30 +2114,39 @@ fn start_sequence<'py, 'v>(
     Ok(RenderStep::Descend)
 }
 
-fn number_to_pyobject(py: Python<'_>, n: &CNumber) -> PyResult<Py<PyAny>> {
-    if !n.is_f64() {
+fn number_to_pyobject(
+    py: Python<'_>,
+    n: &CNumber,
+    types: &HashMap<Arc<str>, Py<PyType>>,
+) -> PyResult<Py<PyAny>> {
+    let plain = if !n.is_f64() {
         if let Some(v) = n.as_i64() {
-            return v.into_py_any(py);
-        }
-
-        if let Some(v) = n.as_u64() {
-            return v.into_py_any(py);
-        }
-
-        // An arbitrary-precision integer: `int.from_bytes`, the inverse of `exact_big_int`'s read.
-        if let Some(big) = n.as_big() {
+            v.into_py_any(py)?
+        } else if let Some(v) = n.as_u64() {
+            v.into_py_any(py)?
+        } else if let Some(big) = n.as_big() {
             let (int_type, kwargs) = int_type_and_signed_kwargs(py)?;
             let bytes = big.to_signed_bytes_le();
-            return int_type
+            int_type
                 .getattr("from_bytes")?
                 .call((PyBytes::new(py, &bytes), "little"), Some(&kwargs))?
-                .into_py_any(py);
+                .into_py_any(py)?
+        } else {
+            n.as_f64()
+                .expect("a non-integer Number is always an f64")
+                .into_py_any(py)?
         }
+    } else {
+        n.as_f64()
+            .expect("a non-integer Number is always an f64")
+            .into_py_any(py)?
+    };
+    if let Some(name) = n.type_name()
+        && let Some(class) = types.get(name)
+    {
+        return class.bind(py).call1((plain,)).map(|o| o.unbind());
     }
-
-    n.as_f64()
-        .expect("a non-integer Number is always an f64")
-        .into_py_any(py)
+    Ok(plain)
 }
 
 /// Every custom object in `values` by the identity a cycle token pointing back

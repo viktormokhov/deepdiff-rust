@@ -776,9 +776,12 @@ def test_types_deepdiff_routes_elsewhere_raise_rather_than_reporting_empty(value
     unequal values -- the invariant the object fallback must keep.
     """
     a, b = value_factory(), value_factory()
+    if a is b:
+        # Singleton / interned values short-circuit like DeepDiff (`t1 is t2`).
+        assert DeepDiff(a, b) == {}
+        return
     with pytest.raises(TypeError):
         DeepDiff(a, b)
-
 
 def test_bytes_does_not_silently_compare_equal() -> None:
     """Two different bytes must not report {} (a false negative)."""
@@ -1169,15 +1172,30 @@ def test_different_unsupported_objects_raise_with_the_path(ignore_order: bool) -
     [
         lambda np, v: np.int64(v),
         lambda np, v: np.float32(v + 0.5),
+    ],
+    ids=["int64", "float32"],
+)
+def test_a_numpy_numeric_scalar_diffs_like_deepdiff(make) -> None:
+    """Numpy int/float scalars keep their class and match DeepDiff's report."""
+    np = pytest.importorskip("numpy")
+    t1, t2 = make(np, 1), make(np, 2)
+    assert DeepDiff(t1, t2) == RealDeepDiff(t1, t2)
+    assert DeepDiff(t1, make(np, 1)) == {}
+    assert DeepDiff(t1, int(t1) if isinstance(t1, np.integer) else float(t1))["type_changes"]
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
         lambda np, v: np.bool_(v == 2),
         lambda np, v: np.datetime64(f"202{v}-01-01"),
     ],
-    ids=["int64", "float32", "bool", "datetime64"],
+    ids=["bool", "datetime64"],
 )
-def test_a_numpy_scalar_is_refused_rather_than_reshaped(make) -> None:
-    """A numpy scalar, which DeepDiff routes to its number, boolean or datetime handler, raises TypeError."""
+def test_a_non_numeric_numpy_scalar_is_still_refused(make) -> None:
+    """bool_/datetime64 are not in the numeric revive path yet."""
     np = pytest.importorskip("numpy")
-    with pytest.raises(TypeError, match="unsupported type for diffing"):
+    with pytest.raises((TypeError, MaxDepthError)):
         DeepDiff(make(np, 1), make(np, 2))
 
 

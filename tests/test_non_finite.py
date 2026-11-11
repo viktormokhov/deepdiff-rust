@@ -161,20 +161,21 @@ def test_non_finite_dict_key_renders_without_crashing() -> None:
     assert new_value == {"Infinity": 1, "-Infinity": 2}
 
 
-# --- the one documented divergence: no Python object identity -------------
+# --- NaN identity: Python-level `t1 is t2` short-circuit -----------------
 
 
-def test_same_nan_object_compared_to_itself_is_onixs_one_divergence() -> None:
-    # No object identity in onix's value model ("Non-finite floats").
+def test_same_nan_object_compared_to_itself_is_empty_like_deepdiff() -> None:
     nan = float("nan")
     real = RealDeepDiff(nan, nan, verbose_level=2)
     assert not real  # DeepDiff: no difference (t1 is t2 shortcut)
+    assert not OnixDeepDiff(nan, nan)
 
-    onix = OnixDeepDiff(nan, nan)
-    assert onix  # onix: always reports a change for a NaN pair
-    assert onix.to_json() == (
-        '{"values_changed":{"root":{"new_value":NaN,"old_value":NaN}}}'
-    )
+
+def test_two_distinct_nan_floats_still_differ_without_ignore_nan_inequality() -> None:
+    a, b = float("nan"), float("nan")
+    assert a is not b
+    assert OnixDeepDiff(a, b)
+    assert not OnixDeepDiff(a, b, ignore_nan_inequality=True)
 
 
 def test_two_distinct_bit_identical_nans_in_a_carried_set_dedup_in_onix_not_deepdiff() -> None:

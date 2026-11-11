@@ -16,8 +16,7 @@ In:
 Out (later phases):
 
 - `hasher` (DeepHash / phase 6)
-- Delta, DeepSearch, numpy
-- `view='tree'` / `pretty()`
+- Delta, DeepSearch
 
 ## Approach: hybrid dual walk
 

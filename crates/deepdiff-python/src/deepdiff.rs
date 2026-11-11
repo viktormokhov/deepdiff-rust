@@ -234,7 +234,7 @@ impl DeepDiff {
     /// `tests/golden/README.md` in the onix repository.
     #[pyo3(signature = (verbose_level=2))]
     fn to_dict(&self, py: Python<'_>, verbose_level: u8) -> PyResult<Py<PyAny>> {
-        value_to_pyobject(py, &*self.at_level(py, verbose_level)?)
+        value_to_pyobject(py, &*self.at_level(py, verbose_level)?, &self.types)
     }
 
     /// `if diff:` truthiness — falsy exactly when `t1`/`t2` had no

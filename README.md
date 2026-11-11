@@ -52,19 +52,17 @@ against live `deepdiff==9.1.0`. Not a complete drop-in for the whole DeepDiff
 | Numbers / strings | `significant_digits`, `math_epsilon`, `use_log_scale`, `ignore_nan_inequality`, `ignore_string_case`, type-ignore groups |
 | Filters | `exclude_paths` / `include_paths` (incl. `*`/`**`), `exclude_regex_paths`, `exclude_types`, `ignore_private_variables` |
 | Callbacks | `exclude_obj_callback`(+`_strict`), `include_obj_callback`(+`_strict`), `iterable_compare_func`, `custom_operators` |
-| Types | `None`, bool, int, float, str, bytes, list/tuple/set/frozenset, dict, Decimal, UUID, complex, datetime/date/time/timedelta, Enum (`use_enum_value`), many custom objects by attributes |
-| Other | `get_deep_distance`, `diff_json` (JSON fast path in Rust) |
+| Types | `None`, bool, int, float, str, bytes, list/tuple/set/frozenset, dict, Decimal, UUID, complex, datetime/date/time/timedelta, Enum / IntEnum (`use_enum_value`), numpy int/float scalars + `ndarray`, many custom objects by attributes |
+| Other | `get_deep_distance`, `view='tree'`, `pretty()`, `diff_json` (JSON fast path in Rust) |
 
 Details and known divergences: [docs/compatibility.md](docs/compatibility.md).
 
 ### Not yet
 
 - `DeepHash` / `hasher`, `DeepSearch`, `Delta` / patch
-- `view='tree'`, `pretty()`
-- numpy numeric types
+- numpy `bool_` / `datetime64` / complex scalars
 - Onix extras we did not port: `diff_tables` (Arrow), `onix` CLI
-- Enum/custom object rendering still dict-shaped in some reports; `IntEnum` diffs as `int`
-- Instant `t1 is t2` short-circuit (identity compare still converts both sides)
+- Some custom-object reports still dict-shaped; `(str, Enum)` pairs still walk `name`/`value`
 
 ## vs `deepdiff-rs` (Onix) and `deepdiff`
 

@@ -405,7 +405,8 @@ pub(crate) fn class_name(value: &Value) -> Option<&str> {
         Value::Set(items) | Value::FrozenSet(items) => items.type_name(),
         Value::Object(map) => map.type_name(),
         Value::Leaf(t) => t.class_name(),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Str(_) => None,
+        Value::Number(n) => n.type_name(),
+        Value::Null | Value::Bool(_) | Value::Str(_) => None,
     }
 }
 
@@ -729,9 +730,19 @@ fn structural_eq(a: &Value, b: &Value) -> bool {
 /// A number preserving [`serde_json`]'s `u64`/`i64`/`f64` split, plus an arbitrary-precision arm
 /// for a Python `int` beyond them, so `1` and `1.0` render differently. A float is non-finite
 /// only when built through [`Number::from_f64`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Number {
     repr: NumberRepr,
+    /// Python/`numpy` class `__name__` when this is not a plain `int`/`float`.
+    type_name: Option<Arc<str>>,
+    /// `IntEnum` / numeric `Enum` member: `use_enum_value` compares the bare number.
+    from_enum: bool,
+}
+
+impl PartialEq for Number {
+    fn eq(&self, other: &Self) -> bool {
+        self.repr == other.repr
+    }
 }
 
 /// Mirrors [`serde_json`]'s internal `N`, plus a boxed `Big` that keeps the enum pointer-sized.
@@ -753,6 +764,8 @@ impl Number {
     pub fn from_u64(value: u64) -> Self {
         Self {
             repr: NumberRepr::PosInt(value),
+            type_name: None,
+            from_enum: false,
         }
     }
 
@@ -764,6 +777,8 @@ impl Number {
             Ok(non_negative) => Self::from_u64(non_negative),
             Err(_) => Self {
                 repr: NumberRepr::NegInt(value),
+                type_name: None,
+                from_enum: false,
             },
         }
     }
@@ -773,6 +788,8 @@ impl Number {
     pub fn from_f64(value: f64) -> Self {
         Self {
             repr: NumberRepr::Float(value),
+            type_name: None,
+            from_enum: false,
         }
     }
 
@@ -788,7 +805,35 @@ impl Number {
         }
         Self {
             repr: NumberRepr::Big(Box::new(value)),
+            type_name: None,
+            from_enum: false,
         }
+    }
+
+    /// Attaches a non-base class name (`numpy.int64` → `"int64"`, etc.).
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: Option<Arc<str>>) -> Self {
+        self.type_name = type_name;
+        self
+    }
+
+    /// Marks this number as an `IntEnum` / numeric `Enum` member's value.
+    #[must_use]
+    pub fn with_from_enum(mut self, from_enum: bool) -> Self {
+        self.from_enum = from_enum;
+        self
+    }
+
+    /// The non-base class name, if any.
+    #[must_use]
+    pub fn type_name(&self) -> Option<&str> {
+        self.type_name.as_deref()
+    }
+
+    /// Whether this came from a numeric `Enum` member.
+    #[must_use]
+    pub fn from_enum(&self) -> bool {
+        self.from_enum
     }
 
     /// Whether this number is a float.
@@ -884,6 +929,8 @@ impl Number {
                 .expect("a serde_json Number that is neither u64 nor i64 is a finite f64");
             Self {
                 repr: NumberRepr::Float(f),
+                type_name: None,
+                from_enum: false,
             }
         }
     }
@@ -1317,6 +1364,12 @@ impl Object {
         if let Some(class) = &mut self.class {
             class.is_enum = true;
         }
+    }
+
+    /// Whether this object was converted from a Python `Enum` member.
+    #[must_use]
+    pub fn is_enum(&self) -> bool {
+        self.class.as_ref().is_some_and(|class| class.is_enum)
     }
 
     /// An `Enum` member's `value` attribute, `None` for any other object.

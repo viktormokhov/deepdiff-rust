@@ -25,8 +25,10 @@ class S(str, enum.Enum):
     X = "x"
 
 
-# A reported custom object renders as a dict (docs/compatibility.md).
-_RENDERS_OBJECT = pytest.mark.xfail(strict=True, reason="an Enum old_value renders as a dict")
+class I(enum.IntEnum):
+    X = 1
+    Y = 2
+
 
 CASES = [
     (C.A, C.B, {}),
@@ -39,10 +41,14 @@ CASES = [
     ({"k": C.A}, {"k": 3}, {}),
     ([C.A, 2], [1, C.B], {}),
     ([C.A, 2], [1, C.B], {"ignore_order": True}),
-    pytest.param([C.A, 5], [7, C.B], {"ignore_order": True}, marks=_RENDERS_OBJECT),
+    ([C.A, 5], [7, C.B], {"ignore_order": True}),
     (S.X, "x", {}),
     (S.X, "y", {}),
-    pytest.param(C.A, 1, {"use_enum_value": False}, marks=_RENDERS_OBJECT),
+    (C.A, 1, {"use_enum_value": False}),
+    (I.X, I.Y, {}),
+    (I.X, 1, {}),
+    (I.X, 1, {"use_enum_value": False}),
+    (I.X, I.Y, {"use_enum_value": False}),
 ]
 
 

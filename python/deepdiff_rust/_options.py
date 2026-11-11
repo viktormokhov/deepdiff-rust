@@ -5,11 +5,25 @@ import decimal
 import fractions
 import uuid
 
-# deepdiff's `numbers` and `strings`, without the numpy types.
-_NUMBERS = (
+# deepdiff's `numbers` and `strings`, plus numpy scalars when numpy is importable.
+_NUMBERS = [
     int, float, complex, decimal.Decimal, fractions.Fraction,
     datetime.datetime, datetime.date, datetime.timedelta, datetime.time,
-)
+]
+try:
+    import numpy as _np
+
+    _NUMBERS.extend(
+        t for t in (
+            getattr(_np, "integer", None),
+            getattr(_np, "floating", None),
+            getattr(_np, "complexfloating", None),
+        )
+        if t is not None
+    )
+except ImportError:
+    pass
+_NUMBERS = tuple(_NUMBERS)
 _STRINGS = (str, bytes, memoryview)
 _UUID_STR = (uuid.UUID, str)
 _ZEROED = ("hour", "minute", "second", "microsecond")

@@ -52,12 +52,17 @@ Filters drop findings after the diff rather than pruning it, so under
 object's `__` attributes.
 `ignore_string_case` and `ignore_numeric_type_changes` do not fold dict
 keys; `truncate_datetime` leaves `time` values alone (DeepDiff reports
-them as seconds); the numpy members of DeepDiff's `numbers` group are left
-out. A reported `Enum` or custom object renders as a dict of its attributes,
-and an `IntEnum` diffs as a plain `int`. `bytes` dict keys (DeepDiff
-crashes) and `UUID` dict keys (DeepDiff reports path `None`) get normal
-paths. A `Decimal` rounds through its nearest `float` under
-`significant_digits` and `math_epsilon`.
+them as seconds). Numpy integer/floating scalars and `ndarray` (via
+`tolist()`) are supported; `bool_`, `datetime64`, and complex numpy
+scalars are still refused. Pure `Enum` members revive in reports;
+`IntEnum` keeps its class on the numeric path like DeepDiff. A
+`(str, Enum)` pair still diffs as `name`/`value` attributes rather than
+one root `values_changed`. Custom objects may still render as attribute
+dicts. `bytes` dict keys (DeepDiff crashes) and `UUID` dict keys
+(DeepDiff reports path `None`) get normal paths. A `Decimal` rounds
+through its nearest `float` under `significant_digits` and
+`math_epsilon`. Identity `t1 is t2` short-circuits to `{}` when
+`group_by` is unset.
 `max_diffs` counts steps where DeepDiff does, except inside the trial
 diffs `ignore_order` runs to pair container items (one step each); it
 does not log DeepDiff's "reached the max number of diffs" warning. Which

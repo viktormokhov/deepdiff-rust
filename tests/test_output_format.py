@@ -90,5 +90,19 @@ def test_invalid_verbose_level_is_refused_like_deepdiff():
 
 
 def test_unsupported_view_is_refused():
-    with pytest.raises(NotImplementedError, match="view='tree'"):
-        DeepDiff(1, 2, view="tree")
+    with pytest.raises(NotImplementedError, match="view='delta'"):
+        DeepDiff(1, 2, view="delta")
+
+
+def test_view_tree_exposes_diff_levels():
+    diff = DeepDiff({"a": 1}, {"a": 2}, view="tree")
+    levels = diff["values_changed"]
+    assert len(levels) == 1
+    assert levels[0].path() == "root['a']"
+    assert levels[0].t1 == 1 and levels[0].t2 == 2
+
+
+def test_pretty_matches_deepdiff_shape():
+    ours = DeepDiff({"a": 1}, {"a": 2}).pretty()
+    real = RealDeepDiff({"a": 1}, {"a": 2}).pretty()
+    assert ours == real

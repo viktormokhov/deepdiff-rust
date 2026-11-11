@@ -124,12 +124,15 @@ def test_max_depth_error_is_a_value_error_subclass() -> None:
 def test_deep_equal_input_also_raises_at_conversion_time() -> None:
     """Equal deep inputs still raise: conversion is bounded by `max_depth` before
     equality is known (`docs/design/depth-budget.md`, "Equal inputs of any depth").
+
+    Same-object identity (`t1 is t2`) short-circuits before conversion; use two
+    equal-but-distinct trees so the depth guard still runs.
     """
-    value = _nested_list(100_000, leaf=1)
+    a = _nested_list(100_000, leaf=1)
+    b = _nested_list(100_000, leaf=1)
 
     with pytest.raises(MaxDepthError):
-        DeepDiff(value, value)
-
+        DeepDiff(a, b)
 
 def test_max_depth_boundary_accepts_exactly_and_rejects_one_more() -> None:
     """Nesting of exactly `max_depth` succeeds; one level deeper raises."""

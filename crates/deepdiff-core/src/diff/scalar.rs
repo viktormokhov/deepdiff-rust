@@ -153,7 +153,9 @@ pub(crate) fn numeric_diff(
     depth: usize,
     opts: &DiffOptions,
 ) -> Result<Report, Error> {
-    if old.is_f64() != new.is_f64() && !opts.same_group(a, b) {
+    let type_name_mismatch = old.type_name() != new.type_name()
+        && !(opts.use_enum_value && (old.from_enum() || new.from_enum()));
+    if (old.is_f64() != new.is_f64() || type_name_mismatch) && !opts.same_group(a, b) {
         return type_change_report(path, a, b, depth, opts.max_depth);
     }
     let equal = numbers_match(old, new, opts);
