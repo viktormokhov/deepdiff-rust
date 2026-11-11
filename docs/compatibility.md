@@ -37,7 +37,8 @@ Implemented, checked against `deepdiff==9.1.0`:
   `iterable_compare_func`, `custom_operators`.
   Object include/exclude callbacks filter on the retain pass (same post-diff
   style as path filters). `iterable_compare_func` and `custom_operators`
-  currently bridge to the installed `deepdiff` package for full walk semantics.
+  run through a Python dual walk that calls the native engine for leaf and
+  unmatched subtrees — no runtime dependency on the `deepdiff` package.
   `hasher` is not supported yet (DeepHash / phase 6).
 - `bytes`, `decimal.Decimal`, `uuid.UUID` and `complex` values, keys and
   set members, under the numeric and string options above.

@@ -7,7 +7,8 @@ import json
 import uuid
 
 from . import _native
-from ._callbacks import _deepdiff_bridge, callbacks_active, compose_skip
+from ._callbacks import callbacks_active, compose_skip
+from ._dual import run_dual
 from ._group_by import group_pair
 from ._options import native_options
 from ._paths import skip_filter
@@ -90,39 +91,39 @@ class DeepDiff(dict):
         )
         exclude_types = tuple(exclude_types) if exclude_types else None
         if custom_operators or iterable_compare_func:
-            real = _deepdiff_bridge(
-                t1, t2,
-                ignore_order=ignore_order, verbose_level=verbose_level, view=view,
-                exclude_paths=exclude_paths, exclude_regex_paths=exclude_regex_paths,
-                include_paths=include_paths, exclude_types=exclude_types,
-                ignore_private_variables=ignore_private_variables,
-                significant_digits=significant_digits,
-                number_format_notation=number_format_notation, math_epsilon=math_epsilon,
-                use_log_scale=use_log_scale,
-                log_scale_similarity_threshold=log_scale_similarity_threshold,
-                ignore_nan_inequality=ignore_nan_inequality,
-                ignore_string_case=ignore_string_case,
-                ignore_numeric_type_changes=ignore_numeric_type_changes,
-                ignore_string_type_changes=ignore_string_type_changes,
-                ignore_type_in_groups=ignore_type_in_groups,
-                ignore_type_subclasses=ignore_type_subclasses,
-                truncate_datetime=truncate_datetime, use_enum_value=use_enum_value,
-                threshold_to_diff_deeper=threshold_to_diff_deeper,
-                cutoff_distance_for_pairs=cutoff_distance_for_pairs,
-                cutoff_intersection_for_pairs=cutoff_intersection_for_pairs,
-                zip_ordered_iterables=zip_ordered_iterables,
-                get_deep_distance=get_deep_distance, report_repetition=report_repetition,
-                max_diffs=max_diffs, max_passes=max_passes,
-                custom_operators=custom_operators,
-                exclude_obj_callback=exclude_obj_callback,
-                exclude_obj_callback_strict=exclude_obj_callback_strict,
-                include_obj_callback=include_obj_callback,
-                include_obj_callback_strict=include_obj_callback_strict,
-                iterable_compare_func=iterable_compare_func,
-            )
+            def native_factory(a, b):
+                return dict(
+                    _native.DeepDiff(
+                        a, b,
+                        ignore_order=ignore_order, max_depth=max_depth,
+                        exclude_types=exclude_types,
+                        ignore_private_variables=ignore_private_variables,
+                        use_enum_value=use_enum_value,
+                        threshold_to_diff_deeper=float(threshold_to_diff_deeper or 0),
+                        cutoff_distance_for_pairs=float(cutoff_distance_for_pairs),
+                        cutoff_intersection_for_pairs=float(cutoff_intersection_for_pairs),
+                        zip_ordered_iterables=zip_ordered_iterables,
+                        get_deep_distance=False, report_repetition=report_repetition,
+                        max_diffs=max_diffs, max_passes=max_passes,
+                        **native_options(
+                            _BUILTIN_TYPES, significant_digits=significant_digits,
+                            number_format_notation=number_format_notation,
+                            math_epsilon=math_epsilon, use_log_scale=use_log_scale,
+                            log_scale_similarity_threshold=log_scale_similarity_threshold,
+                            ignore_nan_inequality=ignore_nan_inequality,
+                            ignore_string_case=ignore_string_case,
+                            ignore_numeric_type_changes=ignore_numeric_type_changes,
+                            ignore_string_type_changes=ignore_string_type_changes,
+                            ignore_type_in_groups=ignore_type_in_groups,
+                            ignore_type_subclasses=ignore_type_subclasses,
+                            truncate_datetime=truncate_datetime,
+                            ignore_uuid_types=ignore_uuid_types,
+                        ),
+                    ).to_dict(verbose_level)
+                )
             self._native = None
-            self._bridge = real
-            super().__init__(dict(real))
+            self._bridge = None
+            super().__init__(run_dual(self, t1, t2, native_factory))
             return
         skip = skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types)
         skip = compose_skip(
@@ -159,7 +160,9 @@ class DeepDiff(dict):
     def to_dict(self, verbose_level=None):
         """The differences as a plain dict, with `type_changes` types as type objects."""
         if self._native is None:
-            return self._bridge.to_dict(verbose_level=self._level(verbose_level))
+            if self._bridge is not None:
+                return self._bridge.to_dict(verbose_level=self._level(verbose_level))
+            return dict(self)
         report = self._native.to_dict(self._level(verbose_level))
         if "type_changes" in report:
             classes = {**_BUILTIN_TYPES, **self._native._types}
@@ -175,7 +178,9 @@ class DeepDiff(dict):
         if default_mapping is not None:
             raise NotImplementedError("default_mapping is not supported yet.")
         if self._native is None:
-            return self._bridge.to_json(verbose_level=self._level(verbose_level), **kwargs)
+            if self._bridge is not None:
+                return self._bridge.to_json(verbose_level=self._level(verbose_level), **kwargs)
+            return json.dumps(self.to_dict(verbose_level), **kwargs) if kwargs else json.dumps(self.to_dict(verbose_level))
         text = self._native.to_json(self._level(verbose_level))
         if self._native.deep_distance is not None:
             report = json.loads(text)
@@ -195,6 +200,20 @@ class DeepDiff(dict):
         keys = {_root_key(path) for findings in report.values() for path in findings}
         keys.discard(_NOT_PRESENT)
         return keys
+
+    def custom_report_result(self, report_type, level, extra_info=None):
+        path = level.path()
+        payload = dict(extra_info or {})
+        if report_type == "values_changed":
+            payload.setdefault("old_value", level.t1)
+            payload.setdefault("new_value", level.t2)
+        bucket = getattr(self, "_walk_report", self).setdefault(report_type, {})
+        bucket[path] = payload
+        if self._native is None and getattr(self, "_bridge", None) is None:
+            self.setdefault(report_type, {})[path] = payload
+
+    def _report_result(self, report_type, change_level, local_tree=None):
+        self.custom_report_result(report_type, change_level)
 
     def _level(self, verbose_level):
         return self.verbose_level if verbose_level is None else _check_verbose_level(verbose_level)

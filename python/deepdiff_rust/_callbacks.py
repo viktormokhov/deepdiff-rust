@@ -109,14 +109,3 @@ def compose_skip(
         return any(skip_obj(path) for path in prefixes)
 
     return skip
-
-def _deepdiff_bridge(t1, t2, **kwargs):
-    """Parity bridge for callbacks that must run during the walk."""
-    try:
-        from deepdiff import DeepDiff as RealDeepDiff
-    except ImportError as exc:
-        raise ImportError(
-            "iterable_compare_func and custom_operators require the deepdiff "
-            "package installed until the native dual-walk hooks land"
-        ) from exc
-    return RealDeepDiff(t1, t2, **kwargs)
