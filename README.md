@@ -102,6 +102,28 @@ maturin develop --release
 pytest -q
 ```
 
+## Publishing to PyPI
+
+GitHub Actions workflow [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
+builds abi3 wheels (Linux x86_64/aarch64, Windows x64, macOS Intel/ARM) plus an
+sdist and uploads them when you push a version tag.
+
+1. Create a PyPI account and an API token.
+2. In the GitHub repo: **Settings → Secrets and variables → Actions** → add
+   `PYPI_API_TOKEN` (the raw token; maturin sends it as the password with user
+   `__token__`).
+3. Tag and push (version in `pyproject.toml` / workspace must match the tag
+   without the leading `v`):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Optional: **Actions → Publish → Run workflow** with `publish=true` for a
+manual upload. Prefer TestPyPI first if you want a dry run (point a separate
+token / workflow at test.pypi.org).
+
 ## Third-party code
 
 Comparison engine and Python conversion modules are forked from Onix,
