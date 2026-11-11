@@ -1,11 +1,10 @@
-"""deepdiff 9.1.0's value-normalization options, as the native diff takes them."""
+"""Normalization options passed through to the native DeepDiff."""
 
 import datetime
 import decimal
 import fractions
 import uuid
 
-# deepdiff's `numbers` and `strings`, plus numpy scalars when numpy is importable.
 _NUMBERS = [
     int, float, complex, decimal.Decimal, fractions.Fraction,
     datetime.datetime, datetime.date, datetime.timedelta, datetime.time,
@@ -31,7 +30,6 @@ _TRUNCATE_FROM = {"day": 0, "hour": 1, "minute": 2, "second": 3}
 
 
 def _type_groups(groups, ignore_string_type_changes, ignore_numeric_type_changes, ignore_uuid_types):
-    """`get_ignore_types_in_groups`: each group a tuple of types."""
     if groups and isinstance(groups[0], type):
         groups = [groups]
     result = [
@@ -53,7 +51,6 @@ def native_options(
     ignore_numeric_type_changes, ignore_string_type_changes, ignore_type_in_groups,
     ignore_type_subclasses, truncate_datetime, ignore_uuid_types=False,
 ):
-    """The native `DeepDiff` keyword arguments for these options."""
     if significant_digits is not None and significant_digits < 0:
         raise ValueError("significant_digits must be None or a non-negative integer")
     if significant_digits is None and ignore_numeric_type_changes:
@@ -81,7 +78,6 @@ def native_options(
         ignore_uuid_types,
     )
     if groups:
-        # ponytail: a u64 mask, so at most 64 groups.
         def group_mask(cls):
             return sum(
                 1 << i for i, group in enumerate(groups)

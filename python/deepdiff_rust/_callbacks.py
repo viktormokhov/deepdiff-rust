@@ -1,4 +1,4 @@
-"""DeepDiff callback helpers: Level, activity, object-callback skip."""
+"""Callback helpers: Level and object-callback skip."""
 
 from collections.abc import Mapping
 
@@ -6,8 +6,6 @@ from ._paths import _elements
 
 
 class Level:
-    """Minimal DeepDiff-compatible level for operators and iterable_compare_func."""
-
     __slots__ = ("t1", "t2", "_path")
 
     def __init__(self, t1, t2, path="root"):
@@ -67,7 +65,6 @@ def compose_skip(
     include_obj_callback=None,
     include_obj_callback_strict=None,
 ):
-    """Retain-filter skip plus DeepDiff object-callback branch of `_skip_this`."""
     if not any(
         (
             exclude_obj_callback,

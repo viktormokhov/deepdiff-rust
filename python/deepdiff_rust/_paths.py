@@ -1,4 +1,4 @@
-"""Path filters: deepdiff 9.1.0's `_skip_this` over rendered path strings."""
+"""Path filters over rendered DeepDiff path strings."""
 
 import ast
 import re
@@ -21,7 +21,6 @@ def _element(text, literal):
 
 @cache
 def _elements(path):
-    """`root['a'][0].b` -> ('a', 0, 'b'); `*`/`**` become wildcard markers."""
     out, i, n = [], 4, len(path)
     while i < n:
         j = i + 1
@@ -46,8 +45,6 @@ def _elements(path):
 
 
 def _matches(pattern, target, prefix):
-    """`pattern` matches `target`, or (`prefix`) some prefix of it."""
-
     @cache
     def go(p, t):
         if p == len(pattern):
@@ -62,8 +59,6 @@ def _matches(pattern, target, prefix):
 
 
 def _could_reach(pattern, target):
-    """`target` is an ancestor of some path `pattern` matches."""
-
     @cache
     def go(p, t):
         if t == len(target):
@@ -78,7 +73,6 @@ def _could_reach(pattern, target):
 
 
 def _root_paths(paths):
-    """deepdiff's `add_root_to_paths`: a bare key also means `root[key]`."""
     result = set()
     for path in paths:
         if path.startswith("root"):
@@ -93,7 +87,6 @@ def _root_paths(paths):
 
 
 def _split(paths):
-    """(exact paths, glob patterns as element tuples), as deepdiff separates them."""
     if not paths:
         return set(), []
     paths = {paths} if isinstance(paths, str) else set(paths)
@@ -115,9 +108,6 @@ def _regexes(items):
 
 
 def skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types):
-    """`skip(prefixes, typed)` for a finding: `prefixes` are its path's rendered
-    prefixes from `root`, `typed[k]` whether `prefixes[k]` holds an
-    `exclude_types` instance. `None` when nothing filters."""
     ex_exact, ex_globs = _split(exclude_paths)
     in_exact, in_globs = _split(include_paths)
     regexes = _regexes(exclude_regex_paths)
@@ -141,7 +131,6 @@ def skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types
         return typed
 
     def skip_report(path):
-        # `_skip_report_for_include_glob`: a glob ancestor is walked, not reported.
         if not in_globs or path in in_exact or any(p in path for p in in_exact):
             return False
         return not any(_matches(g, _elements(path), True) for g in in_globs)

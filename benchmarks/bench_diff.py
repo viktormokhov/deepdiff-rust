@@ -8,8 +8,6 @@ The report includes wall time and peak tracemalloc usage. Use an external RSS
 sampler (for example /usr/bin/time -v) for process peak resident memory.
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import statistics

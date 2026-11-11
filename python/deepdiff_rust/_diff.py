@@ -1,4 +1,4 @@
-"""The `DeepDiff` result: a `dict` of findings, like `deepdiff.DeepDiff`."""
+"""DeepDiff result dict, drop-in for deepdiff.DeepDiff."""
 
 import ast
 import datetime
@@ -34,13 +34,10 @@ _NOT_PRESENT = object()
 
 
 def _root_key(path):
-    """The key, index or attribute name right after `root` in a rendered path."""
     rest = path[len("root"):]
     if rest.startswith("."):
         ends = [i for i in (rest.find(".", 1), rest.find("[")) if i > 0]
         return rest[1 : min(ends, default=len(rest))]
-    # ponytail: tries each "]" until the key parses as a literal; a key whose
-    # repr is not a Python literal is skipped.
     end = rest.find("]")
     while end != -1:
         try:
@@ -51,7 +48,6 @@ def _root_key(path):
 
 
 class DeepDiff(dict):
-    """A drop-in `deepdiff.DeepDiff`: the differences between `t1` and `t2` as a dict."""
 
     def __init__(
         self, t1, t2, *, ignore_order=False, max_depth=None, verbose_level=1, view="text",
@@ -80,7 +76,6 @@ class DeepDiff(dict):
             self.t1 = t1
             self.t2 = t2
             self._native = None
-            self._bridge = None
             self.tree = {}
             super().__init__()
             return
@@ -134,7 +129,6 @@ class DeepDiff(dict):
                     ).to_dict(verbose_level)
                 )
             self._native = None
-            self._bridge = None
             self._finish_init(run_dual(self, t1, t2, native_factory))
             return
         skip = skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types)
@@ -145,7 +139,6 @@ class DeepDiff(dict):
             include_obj_callback=include_obj_callback,
             include_obj_callback_strict=include_obj_callback_strict,
         )
-        self._bridge = None
         self._native = _native.DeepDiff(
             t1, t2, ignore_order=ignore_order, max_depth=max_depth, exclude_types=exclude_types,
             ignore_private_variables=ignore_private_variables, skip=skip, use_enum_value=use_enum_value,
@@ -170,21 +163,16 @@ class DeepDiff(dict):
         self._finish_init(self.to_dict())
 
     def _finish_init(self, report):
-        """Store text report, build `.tree`, and optionally switch to view='tree'."""
         text = dict(report)
-        self.tree = build_tree(text, self.verbose_level)
+        self.tree = build_tree(text)
         if self.view == "tree":
             super().__init__(tree_as_result(self.tree))
         else:
             super().__init__(text)
 
     def to_dict(self, verbose_level=None):
-        """The differences as a plain dict, with `type_changes` types as type objects."""
         if self._native is None:
-            if self._bridge is not None:
-                return self._bridge.to_dict(verbose_level=self._level(verbose_level))
             if getattr(self, "view", "text") == "tree":
-                # Rebuild a text-shaped dict from levels when asked.
                 out = {}
                 for key, levels in self.tree.items():
                     if key.endswith(("_added", "_removed")) and self._level(verbose_level) < 2:
@@ -220,13 +208,11 @@ class DeepDiff(dict):
         return report
 
     def to_json(self, default_mapping=None, force_use_builtin_json=False, verbose_level=None, **kwargs):
-        """The differences as JSON; extra keyword arguments go to `json.dumps`."""
         if default_mapping is not None:
             raise NotImplementedError("default_mapping is not supported yet.")
         if self._native is None:
-            if self._bridge is not None:
-                return self._bridge.to_json(verbose_level=self._level(verbose_level), **kwargs)
-            return json.dumps(self.to_dict(verbose_level), **kwargs) if kwargs else json.dumps(self.to_dict(verbose_level))
+            data = self.to_dict(verbose_level)
+            return json.dumps(data, **kwargs) if kwargs else json.dumps(data)
         text = self._native.to_json(self._level(verbose_level))
         if self._native.deep_distance is not None:
             report = json.loads(text)
@@ -236,7 +222,6 @@ class DeepDiff(dict):
 
     @property
     def affected_paths(self):
-        """The paths of every difference in this result."""
         paths = set()
         for key, findings in self.items():
             if key == "deep_distance":
@@ -251,7 +236,6 @@ class DeepDiff(dict):
 
     @property
     def affected_root_keys(self):
-        """The root keys, indices or attribute names the differences sit under."""
         report = self.to_dict(2)
         keys = set()
         for findings in report.values():
@@ -263,8 +247,7 @@ class DeepDiff(dict):
         return keys
 
     def pretty(self, prefix=None):
-        """Human-readable multi-line summary of the differences."""
-        tree = getattr(self, "tree", None) or build_tree(self.to_dict(), self.verbose_level)
+        tree = getattr(self, "tree", None) or build_tree(self.to_dict())
         return pretty_from_tree(tree, self.verbose_level, prefix)
 
     def custom_report_result(self, report_type, level, extra_info=None):
@@ -275,7 +258,7 @@ class DeepDiff(dict):
             payload.setdefault("new_value", level.t2)
         bucket = getattr(self, "_walk_report", self).setdefault(report_type, {})
         bucket[path] = payload
-        if self._native is None and getattr(self, "_bridge", None) is None:
+        if self._native is None:
             self.setdefault(report_type, {})[path] = payload
 
     def _report_result(self, report_type, change_level, local_tree=None):

@@ -11,8 +11,6 @@ pre-existing container-hashing divergence a biased alphabet inside a hashable co
 would otherwise trigger.
 """
 
-from __future__ import annotations
-
 import collections
 import datetime
 import enum

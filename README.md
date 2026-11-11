@@ -21,7 +21,7 @@ print(DeepDiff({"a": 1, "b": [1, 2]}, {"a": 2, "b": [1, 3]}))
 From a local wheel (Windows / manylinux x86_64 abi3):
 
 ```bash
-pip install --force-reinstall --no-deps path/to/deepdiff_rust-0.1.0-*.whl
+pip install --force-reinstall --no-deps path/to/deepdiff_rust-0.1.1-*.whl
 ```
 
 From source (Rust toolchain + Maturin):
@@ -123,7 +123,7 @@ value; maturin authenticates as user `__token__`.
 3. Install and smoke-test:
 
 ```bash
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ deepdiff-rust==0.1.0
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ deepdiff-rust==0.1.1
 python -c "from deepdiff_rust import DeepDiff; print(DeepDiff({'a':1},{'a':2}))"
 ```
 
@@ -132,12 +132,12 @@ python -c "from deepdiff_rust import DeepDiff; print(DeepDiff({'a':1},{'a':2}))"
 ### Production release
 
 1. Version in `pyproject.toml` and `[workspace.package]` must match the tag
-   without the leading `v` (e.g. `0.1.0` ↔ `v0.1.0`).
+   without the leading `v` (e.g. `0.1.1` ↔ `v0.1.1`).
 2. Push the tag (or run the workflow with target `pypi`):
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 3. After the job finishes: `pip install deepdiff-rust`.

@@ -115,8 +115,6 @@ impl DeepDiff {
             }
             opts.type_groups = Some(Arc::new(groups));
         }
-        // ponytail: filters drop findings after the diff instead of pruning it, so an
-        // excluded part still pairs under ignore_order; prune in the core if that matters.
         let excluded = std::mem::take(&mut held.excluded);
         let skip_error = Mutex::new(None);
         let keep = |path: &[PathSegment]| {

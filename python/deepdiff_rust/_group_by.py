@@ -1,4 +1,4 @@
-"""`group_by`: a list of dicts regrouped into a dict before the diff, as DeepDiff does."""
+"""group_by: regroup a list of dicts before the diff."""
 
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
@@ -16,7 +16,6 @@ def _add(result, key, row, sort_key):
 
 
 def _group(item, group_by, sort_key):
-    """DeepDiff's `_group_iterable_to_dict`; raises `KeyError` or `ValueError` when it cannot."""
     level1, level2 = group_by, None
     if isinstance(group_by, (list, tuple)):
         level1, level2 = group_by[0], group_by[1] if len(group_by) > 1 else None
@@ -39,7 +38,6 @@ def _group(item, group_by, sort_key):
 
 
 def group_pair(t1, t2, group_by, group_by_sort_key):
-    """`(t1, t2)` grouped, or both unchanged when either side cannot be grouped."""
     if not group_by:
         return t1, t2
     sort_key = group_by_sort_key

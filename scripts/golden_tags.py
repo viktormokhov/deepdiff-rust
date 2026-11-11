@@ -9,8 +9,6 @@ microseconds}`` triple, not a flattened microsecond count, which overflows an
 parse paths never interpret these tags; ``crates/onix-core/tests/golden.rs`` implements the same rule.
 """
 
-from __future__ import annotations
-
 import datetime
 import enum
 import json

@@ -1,4 +1,4 @@
-"""Native dual walk for custom_operators and iterable_compare_func."""
+"""Dual walk for custom_operators and iterable_compare_func."""
 
 from collections.abc import Mapping, Sequence
 

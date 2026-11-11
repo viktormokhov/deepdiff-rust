@@ -1,11 +1,7 @@
-"""pretty() formatting and a minimal view='tree' DiffLevel."""
-
-from __future__ import annotations
+"""pretty() and view='tree' DiffLevel."""
 
 
 class DiffLevel:
-    """Minimal DeepDiff tree node: path, t1/t2, report_type."""
-
     __slots__ = ("t1", "t2", "report_type", "_path", "additional")
 
     def __init__(self, path, t1, t2, report_type):
@@ -85,8 +81,7 @@ def _level_from_finding(report_type, path, payload):
     return DiffLevel(path, payload, payload, report_type)
 
 
-def build_tree(report: dict, verbose_level: int = 1) -> dict:
-    """text-report dict → {category: [DiffLevel, ...]} like DeepDiff.tree."""
+def build_tree(report):
     tree = {}
     for report_type, findings in report.items():
         if report_type == "deep_distance":
@@ -100,12 +95,11 @@ def build_tree(report: dict, verbose_level: int = 1) -> dict:
     return tree
 
 
-def tree_as_result(tree: dict) -> dict:
-    """DeepDiff view='tree' shape: category → list of DiffLevel."""
+def tree_as_result(tree):
     return {key: list(levels) for key, levels in tree.items()}
 
 
-def pretty_from_tree(tree: dict, verbose_level: int = 1, prefix=None) -> str:
+def pretty_from_tree(tree, verbose_level=1, prefix=None):
     forms = _PRETTY_V2 if verbose_level == 2 else _PRETTY
     if prefix is None:
         prefix = ""
@@ -115,12 +109,10 @@ def pretty_from_tree(tree: dict, verbose_level: int = 1, prefix=None) -> str:
             template = forms.get(level.report_type, "")
             if not template:
                 continue
-            type_t1 = type(level.t1).__name__
-            type_t2 = type(level.t2).__name__
             line = template.format(
                 diff_path=level.path(),
-                type_t1=type_t1,
-                type_t2=type_t2,
+                type_t1=type(level.t1).__name__,
+                type_t2=type(level.t2).__name__,
                 val_t1=_fmt_val(level.t1),
                 val_t2=_fmt_val(level.t2),
             )

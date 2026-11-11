@@ -6,8 +6,6 @@ Both sides are built independently, so DeepDiff's `t1 is t2` shortcut never
 skips a subtree. Wall time only; the reports are checked equal.
 """
 
-from __future__ import annotations
-
 import argparse
 import statistics
 import time
