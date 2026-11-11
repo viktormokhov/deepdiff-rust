@@ -17,7 +17,7 @@ Implemented, checked against `deepdiff==9.1.0`:
 - `DeepDiff` is a `dict` of findings, like the reference result object.
 - `ignore_order`, `max_depth` (an extension DeepDiff lacks), `verbose_level`
   0/1/2 with the reference default of 1, `view='text'`.
-- `to_dict(verbose_level=...)`, `to_json(verbose_level=..., **json_dumps_kwargs)`,
+- `to_dict(verbose_level=...)`, `to_json(verbose_level=..., default_mapping=..., **json_dumps_kwargs)`,
   `affected_paths`, `affected_root_keys`, `t1`, `t2`.
 - `type_changes` reports type objects in `to_dict()`, type names in `to_json()`.
 - `exclude_paths`, `include_paths` (exact, bare keys, and `*`/`**` globs),
@@ -26,7 +26,7 @@ Implemented, checked against `deepdiff==9.1.0`:
   `use_log_scale`, `log_scale_similarity_threshold`, `ignore_nan_inequality`,
   `ignore_string_case`, `ignore_numeric_type_changes`,
   `ignore_string_type_changes`, `ignore_type_in_groups`,
-  `ignore_type_subclasses`, `truncate_datetime` (datetimes),
+  `ignore_type_subclasses`, `truncate_datetime` (datetimes and times),
   `ignore_uuid_types`, `use_enum_value`.
 - `zip_ordered_iterables`, `threshold_to_diff_deeper`,
   `cutoff_distance_for_pairs`, `cutoff_intersection_for_pairs`,
@@ -51,17 +51,16 @@ Filters drop findings after the diff rather than pruning it, so under
 `ignore_private_variables=False` uncovers `__` dict keys but not an
 object's `__` attributes.
 `ignore_string_case` and `ignore_numeric_type_changes` do not fold dict
-keys; `truncate_datetime` leaves `time` values alone (DeepDiff reports
-them as seconds). Numpy integer/floating scalars and `ndarray` (via
-`tolist()`) are supported; `bool_`, `datetime64`, and complex numpy
-scalars are still refused. Pure `Enum` members and custom objects revive as the live
-instances in report values; `IntEnum` keeps its class on the numeric
-path; `(str, Enum)` pairs report one root `values_changed` like
-DeepDiff. `bytes` dict keys (DeepDiff crashes) and `UUID` dict keys
-(DeepDiff reports path `None`) get normal paths. A `Decimal` rounds
-through its nearest `float` under `significant_digits` and
-`math_epsilon`. Identity `t1 is t2` short-circuits to `{}` when
-`group_by` is unset.
+keys. `truncate_datetime` on `time` values matches DeepDiff (seconds
+since midnight). Numpy integer/floating/`bool_`/`datetime64`/complex
+scalars and `ndarray` (via `tolist()`) are supported. Pure `Enum`
+members and custom objects revive as the live instances in report
+values; `IntEnum` keeps its class on the numeric path; `(str, Enum)`
+pairs report one root `values_changed` like DeepDiff. `bytes` dict keys
+(DeepDiff crashes) and `UUID` dict keys (DeepDiff reports path `None`)
+get normal paths. A `Decimal` rounds through its nearest `float` under
+`significant_digits` and `math_epsilon`. Identity `t1 is t2`
+short-circuits to `{}` when `group_by` is unset.
 `max_diffs` counts steps where DeepDiff does, except inside the trial
 diffs `ignore_order` runs to pair container items (one step each); it
 does not log DeepDiff's "reached the max number of diffs" warning. Which

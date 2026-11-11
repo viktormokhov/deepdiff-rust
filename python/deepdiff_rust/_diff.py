@@ -33,6 +33,34 @@ def _check_verbose_level(verbose_level):
 _NOT_PRESENT = object()
 
 
+def _json_default(default_mapping):
+    """DeepDiff-style `json.dumps` default: mapping first, then a small builtin fallback."""
+    mapping = dict(default_mapping or ())
+
+    def default(obj):
+        for typ, convert in mapping.items():
+            if isinstance(obj, typ):
+                return convert(obj)
+        if isinstance(obj, decimal.Decimal):
+            return float(obj)
+        if isinstance(obj, (set, frozenset)):
+            return list(obj)
+        if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
+            return obj.isoformat()
+        if isinstance(obj, uuid.UUID):
+            return str(obj)
+        if isinstance(obj, bytes):
+            return list(obj)
+        if isinstance(obj, type):
+            return obj.__name__
+        raise TypeError(
+            f"Don't know how to JSON-serialize {obj!r} (type {type(obj).__name__}); "
+            "consider adding it to default_mapping."
+        )
+
+    return default
+
+
 def _root_key(path):
     rest = path[len("root"):]
     if rest.startswith("."):
@@ -208,11 +236,17 @@ class DeepDiff(dict):
         return report
 
     def to_json(self, default_mapping=None, force_use_builtin_json=False, verbose_level=None, **kwargs):
-        if default_mapping is not None:
-            raise NotImplementedError("default_mapping is not supported yet.")
+        if default_mapping is not None or force_use_builtin_json:
+            return json.dumps(
+                self.to_dict(verbose_level),
+                default=_json_default(default_mapping),
+                **kwargs,
+            )
         if self._native is None:
             data = self.to_dict(verbose_level)
-            return json.dumps(data, **kwargs) if kwargs else json.dumps(data)
+            return json.dumps(data, default=_json_default(None), **kwargs) if kwargs else json.dumps(
+                data, default=_json_default(None)
+            )
         text = self._native.to_json(self._level(verbose_level))
         if self._native.deep_distance is not None:
             report = json.loads(text)

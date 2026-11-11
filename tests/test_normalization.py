@@ -75,9 +75,24 @@ TRUNCATE_CASES = [
     pytest.param(DT(2020, 1, 1, 10), DT(2020, 1, 2, 11), "day", id="day-changed"),
 ]
 
+TIME = datetime.time
+TRUNCATE_TIME_CASES = [
+    pytest.param(TIME(10, 30, 15), TIME(10, 30, 45), "second", id="time-second"),
+    pytest.param(TIME(10, 30, 15), TIME(10, 30, 45), "minute", id="time-minute-equal"),
+    pytest.param(TIME(10, 30), TIME(11, 30), "hour", id="time-hour"),
+    pytest.param(TIME(10, 30), TIME(11, 30), "day", id="time-day-equal"),
+]
+
 
 @pytest.mark.parametrize(("t1", "t2", "unit"), TRUNCATE_CASES)
 def test_truncate_datetime_matches_reference(t1, t2, unit):
+    actual = DeepDiff({"t": t1}, {"t": t2}, truncate_datetime=unit, verbose_level=2)
+
+    assert actual == RealDeepDiff({"t": t1}, {"t": t2}, truncate_datetime=unit, verbose_level=2)
+
+
+@pytest.mark.parametrize(("t1", "t2", "unit"), TRUNCATE_TIME_CASES)
+def test_truncate_time_matches_reference(t1, t2, unit):
     actual = DeepDiff({"t": t1}, {"t": t2}, truncate_datetime=unit, verbose_level=2)
 
     assert actual == RealDeepDiff({"t": t1}, {"t": t2}, truncate_datetime=unit, verbose_level=2)

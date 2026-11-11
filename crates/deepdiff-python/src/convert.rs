@@ -147,6 +147,18 @@ fn classify_temporal(
             truncated = current.call_method("replace", (), Some(fields.bind(current.py())))?;
             &truncated
         }
+        // DeepDiff turns truncated `time` into seconds-since-midnight ints.
+        Some(fields)
+            if current.cast::<PyTime>().is_ok() && current.cast::<PyDateTime>().is_err() =>
+        {
+            truncated = current.call_method("replace", (), Some(fields.bind(current.py())))?;
+            let hour: u64 = truncated.getattr("hour")?.extract()?;
+            let minute: u64 = truncated.getattr("minute")?.extract()?;
+            let second: u64 = truncated.getattr("second")?.extract()?;
+            return Ok(Some(CValue::Number(CNumber::from_u64(
+                hour * 3600 + minute * 60 + second,
+            ))));
+        }
         _ => current,
     };
     if current.cast_exact::<PyDateTime>().is_ok() {
@@ -613,7 +625,7 @@ fn is_loaded_instance(obj: &Bound<'_, PyAny>, module: &str, class: &str) -> PyRe
     }
 }
 
-/// Numpy scalar → [`CValue::Number`] with the numpy class `__name__`.
+/// Numpy scalar → a typed leaf/number/temporal value with the numpy class `__name__`.
 fn classify_numpy_scalar(
     current: &Bound<'_, PyAny>,
     path: &[PathSegment],
@@ -622,8 +634,20 @@ fn classify_numpy_scalar(
     if !is_loaded_instance(current, "numpy", "generic")? {
         return Ok(None);
     }
-    let name = type_name(current);
     let class = class_name(current, held);
+    if is_loaded_instance(current, "numpy", "bool_")? {
+        let bit = if current.is_truthy()? { 1 } else { 0 };
+        return Ok(Some(CValue::Number(
+            CNumber::from_u64(bit).with_type_name(Some(class)),
+        )));
+    }
+    if is_loaded_instance(current, "numpy", "datetime64")? {
+        let item = current.call_method0("item")?;
+        if let Some(value) = classify_temporal(&item, path, held)? {
+            return Ok(Some(with_type_name(value, class)));
+        }
+        return Ok(None);
+    }
     // Prefer float: `np.float64` also answers to integer casts via Python.
     if is_loaded_instance(current, "numpy", "floating")? {
         let f: f64 = current.extract()?;
@@ -639,9 +663,38 @@ fn classify_numpy_scalar(
             _ => number,
         }));
     }
-    // Other numpy.generic (e.g. complexfloating): leave for opaque/error paths.
-    let _ = name;
+    if is_loaded_instance(current, "numpy", "complexfloating")? {
+        let as_complex = current.py().get_type::<PyComplex>().call1((current,))?;
+        let c = as_complex.cast::<PyComplex>()?;
+        return Ok(Some(CValue::Leaf(Typed::with_class_name(
+            Box::new(Leaf::Complex(c.real(), c.imag())),
+            Some(class),
+        ))));
+    }
     Ok(None)
+}
+
+/// Attach a non-base class name onto a temporal / leaf value.
+fn with_type_name(value: CValue, class: Arc<str>) -> CValue {
+    match &value {
+        CValue::DateTime(t) => {
+            return CValue::DateTime(Typed::with_class_name(t.value(), Some(class)));
+        }
+        CValue::Date(t) => {
+            return CValue::Date(Typed::with_class_name(t.value(), Some(class)));
+        }
+        CValue::Time(t) => {
+            return CValue::Time(Typed::with_class_name(t.value(), Some(class)));
+        }
+        CValue::TimeDelta(t) => {
+            return CValue::TimeDelta(Typed::with_class_name(t.value(), Some(class)));
+        }
+        CValue::Leaf(t) => {
+            return CValue::Leaf(Typed::with_class_name((**t).clone(), Some(class)));
+        }
+        _ => {}
+    }
+    value
 }
 
 /// Whether `obj` is an `ipaddress` address, network, or interface — the types
@@ -1883,15 +1936,36 @@ pub(crate) fn value_to_pyobject(
                 CValue::Str(s) => RenderStep::Done(wtf8_to_pyobject(py, s.as_bytes())?),
                 // Renders back as the plain base type, never the subclass instance:
                 // docs/design/value-conversion.md's "Subclasses" section.
-                CValue::DateTime(value) => {
-                    RenderStep::Done(datetime_to_pyobject(py, value.value())?)
-                }
-                CValue::Date(value) => RenderStep::Done(date_to_pyobject(py, value.value())?),
-                CValue::Time(value) => RenderStep::Done(time_to_pyobject(py, value.value())?),
-                CValue::TimeDelta(value) => {
-                    RenderStep::Done(timedelta_to_pyobject(py, value.value())?)
-                }
-                CValue::Leaf(leaf) => RenderStep::Done(leaf_to_pyobject(py, leaf)?),
+                CValue::DateTime(value) => RenderStep::Done(revive_typed(
+                    py,
+                    datetime_to_pyobject(py, value.value())?,
+                    value.class_name(),
+                    types,
+                )?),
+                CValue::Date(value) => RenderStep::Done(revive_typed(
+                    py,
+                    date_to_pyobject(py, value.value())?,
+                    value.class_name(),
+                    types,
+                )?),
+                CValue::Time(value) => RenderStep::Done(revive_typed(
+                    py,
+                    time_to_pyobject(py, value.value())?,
+                    value.class_name(),
+                    types,
+                )?),
+                CValue::TimeDelta(value) => RenderStep::Done(revive_typed(
+                    py,
+                    timedelta_to_pyobject(py, value.value())?,
+                    value.class_name(),
+                    types,
+                )?),
+                CValue::Leaf(leaf) => RenderStep::Done(revive_typed(
+                    py,
+                    leaf_to_pyobject(py, leaf)?,
+                    leaf.class_name(),
+                    types,
+                )?),
                 CValue::Array(items) => {
                     start_sequence(py, SeqKind::List, items, &mut stack, &mut pending)?
                 }
@@ -2223,8 +2297,8 @@ fn classify_leaf(obj: &Bound<'_, PyAny>) -> PyResult<Option<Leaf>> {
 }
 
 /// Rebuilds a [`Leaf`] as its plain base type.
-fn leaf_to_pyobject(py: Python<'_>, leaf: &Leaf) -> PyResult<Py<PyAny>> {
-    match leaf {
+fn leaf_to_pyobject(py: Python<'_>, leaf: &Typed<Box<Leaf>>) -> PyResult<Py<PyAny>> {
+    match &***leaf {
         Leaf::Bytes(b) => PyBytes::new(py, b).into_py_any(py),
         Leaf::Complex(re, im) => PyComplex::from_doubles(py, *re, *im).into_py_any(py),
         Leaf::Decimal(d) => {
@@ -2236,5 +2310,24 @@ fn leaf_to_pyobject(py: Python<'_>, leaf: &Leaf) -> PyResult<Py<PyAny>> {
             let class = py.import("uuid")?.getattr("UUID")?;
             class.call((), Some(&kwargs))?.into_py_any(py)
         }
+    }
+}
+
+/// Re-wrap a plain rebuilt value in its recorded subclass / numpy class when known.
+fn revive_typed(
+    py: Python<'_>,
+    plain: Py<PyAny>,
+    class_name: Option<&str>,
+    types: &HashMap<Arc<str>, Py<PyType>>,
+) -> PyResult<Py<PyAny>> {
+    let Some(name) = class_name else {
+        return Ok(plain);
+    };
+    let Some(class) = types.get(name) else {
+        return Ok(plain);
+    };
+    match class.bind(py).call1((plain.bind(py),)) {
+        Ok(obj) => obj.into_py_any(py),
+        Err(_) => Ok(plain),
     }
 }

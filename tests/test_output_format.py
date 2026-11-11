@@ -84,6 +84,16 @@ def test_to_json_passes_json_dumps_kwargs():
     assert diff.to_json(indent=2) == RealDeepDiff({"a": 1}, {"a": 2}).to_json(indent=2)
 
 
+def test_to_json_default_mapping_overrides_serialization():
+    import datetime
+
+    t1, t2 = {"d": datetime.date(2020, 1, 1)}, {"d": datetime.date(2021, 1, 1)}
+    mapping = {datetime.date: lambda d: d.year}
+    actual = DeepDiff(t1, t2, verbose_level=2).to_json(default_mapping=mapping)
+    reference = RealDeepDiff(t1, t2, verbose_level=2).to_json(default_mapping=mapping)
+    assert json.loads(actual) == json.loads(reference)
+
+
 def test_invalid_verbose_level_is_refused_like_deepdiff():
     with pytest.raises(ValueError, match="verbose_level should be 0, 1, or 2."):
         DeepDiff(1, 2, verbose_level=3)

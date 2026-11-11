@@ -1204,14 +1204,14 @@ def test_a_numpy_numeric_scalar_diffs_like_deepdiff(make) -> None:
     [
         lambda np, v: np.bool_(v == 2),
         lambda np, v: np.datetime64(f"202{v}-01-01"),
+        lambda np, v: np.complex64(v + 1j),
     ],
-    ids=["bool", "datetime64"],
+    ids=["bool", "datetime64", "complex64"],
 )
-def test_a_non_numeric_numpy_scalar_is_still_refused(make) -> None:
-    """bool_/datetime64 are not in the numeric revive path yet."""
+def test_numpy_bool_datetime_complex_diffs_like_deepdiff(make) -> None:
     np = pytest.importorskip("numpy")
-    with pytest.raises((TypeError, MaxDepthError)):
-        DeepDiff(make(np, 1), make(np, 2))
+    t1, t2 = make(np, 1), make(np, 2)
+    assert DeepDiff(t1, t2, verbose_level=2) == RealDeepDiff(t1, t2, verbose_level=2)
 
 
 def test_a_class_identity_stays_unique_when_a_getter_frees_its_type() -> None:
