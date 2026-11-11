@@ -1,69 +1,100 @@
 # deepdiff-rust
 
-A Rust implementation of the `DeepDiff` API for Python. The engine started
-as a fork of [Onix](https://github.com/ksco92/onix) and is maintained here.
+Rust-backed [DeepDiff](https://github.com/seperman/deepdiff) for Python.
+Forked from [Onix](https://github.com/ksco92/onix) (`deepdiff-rs`) and extended
+toward full `deepdiff==9.1.0` parity for the comparison API.
 
-> **Status: early development.** This repository is not yet a complete
-> replacement for the `deepdiff` package. The initial target is the
-> `DeepDiff` comparison API and its live-Python-object conversion path.
-
-## Quick start
-
-Build from source with Rust, Python 3.10+, and Maturin:
-
-```bash
-git clone https://github.com/viktormokhov/deepdiff-rust.git
-cd deepdiff-rust
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install maturin pytest
-maturin develop --release
-python -m pytest
-```
-
-The package exposes a separate import namespace so it can coexist with the reference DeepDiff package for differential testing:
+- **Distribution:** `deepdiff-rust`
+- **Import:** `deepdiff_rust` (does not shadow PyPI `deepdiff` or `deepdiff-rs`)
+- **Runtime deps:** none (CPython 3.10+)
+- **Branch:** `fork-onix` is the active development line
 
 ```python
 from deepdiff_rust import DeepDiff
 
-diff = DeepDiff({"a": 1}, {"a": 2})
-print(diff.to_dict())
-print(diff.to_json())
+print(DeepDiff({"a": 1, "b": [1, 2]}, {"a": 2, "b": [1, 3]}))
+# {'values_changed': {"root['a']": {...}, "root['b'][1]": {...}}}
 ```
 
-The project distribution is named `deepdiff-rust`; its import package is `deepdiff_rust`. This lets the original `deepdiff` package remain installed as a differential-test oracle. A separate import-compatibility shim can be considered later, but should not shadow the reference package in the same environment.
+## Install
+
+From a local wheel (Windows / manylinux x86_64 abi3):
+
+```bash
+pip install --force-reinstall --no-deps path/to/deepdiff_rust-0.1.0-*.whl
+```
+
+From source (Rust toolchain + Maturin):
+
+```bash
+git clone https://github.com/viktormokhov/deepdiff-rust.git
+cd deepdiff-rust
+git checkout fork-onix
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install maturin
+maturin develop --release
+```
+
+## Status
+
+**Core `DeepDiff(...)` comparison is largely done** and differentially tested
+against live `deepdiff==9.1.0`. Not a complete drop-in for the whole DeepDiff
+*package* yet (no DeepHash / DeepSearch / Delta).
+
+### Supported (tested vs DeepDiff 9.1.0)
+
+| Area | Options / behavior |
+|---|---|
+| Result API | `dict`-like result, `to_dict` / `to_json`, `affected_paths`, `affected_root_keys`, `t1` / `t2`, `verbose_level` 0/1/2 |
+| Order | `ignore_order`, `zip_ordered_iterables`, pairing cutoffs, `threshold_to_diff_deeper`, `report_repetition`, `group_by` |
+| Limits | `max_diffs`, `max_passes`, `max_depth` (extension beyond DeepDiff) |
+| Numbers / strings | `significant_digits`, `math_epsilon`, `use_log_scale`, `ignore_nan_inequality`, `ignore_string_case`, type-ignore groups |
+| Filters | `exclude_paths` / `include_paths` (incl. `*`/`**`), `exclude_regex_paths`, `exclude_types`, `ignore_private_variables` |
+| Callbacks | `exclude_obj_callback`(+`_strict`), `include_obj_callback`(+`_strict`), `iterable_compare_func`, `custom_operators` |
+| Types | `None`, bool, int, float, str, bytes, list/tuple/set/frozenset, dict, Decimal, UUID, complex, datetime/date/time/timedelta, Enum (`use_enum_value`), many custom objects by attributes |
+| Other | `get_deep_distance`, `diff_json` (JSON fast path in Rust) |
+
+Details and known divergences: [docs/compatibility.md](docs/compatibility.md).
+
+### Not yet
+
+- `DeepHash` / `hasher`, `DeepSearch`, `Delta` / patch
+- `view='tree'`, `pretty()`
+- numpy numeric types
+- Onix extras we did not port: `diff_tables` (Arrow), `onix` CLI
+- Enum/custom object rendering still dict-shaped in some reports; `IntEnum` diffs as `int`
+- Instant `t1 is t2` short-circuit (identity compare still converts both sides)
+
+## vs `deepdiff-rs` (Onix) and `deepdiff`
+
+| | `deepdiff` | `deepdiff-rs` (Onix) | **this package** |
+|---|---|---|---|
+| Engine | pure Python | Rust | Rust (Onix fork) |
+| Import | `deepdiff` | `deepdiff_rs` | `deepdiff_rust` |
+| Pip runtime deps | several | none (+ optional pyarrow) | none |
+| Full DeepDiff option set | yes | core only | most comparison options |
+| DeepHash / Delta / Search | yes | no | no (planned) |
+| Arrow `diff_tables` | no | yes | no |
+
+Keep stock `deepdiff` installed only if you want differential tests or a reference oracle.
 
 ## Architecture
 
-- `crates/deepdiff-core`: comparison engine, paths, reports (forked from Onix,
-  see [ADR 0002](docs/architecture/adr-0002-fork-onix.md)).
-- `crates/deepdiff-python`: PyO3 extension and the public Python package
-  integration.
-- `python/deepdiff_rust`: Python import facade.
-- `tests`: Python API and differential tests.
+- `crates/deepdiff-core` — comparison engine, paths, reports
+- `crates/deepdiff-python` — PyO3 extension (`deepdiff_rust._native`)
+- `python/deepdiff_rust` — public Python API
+- `tests` — API + differential tests against `deepdiff==9.1.0`
+- `docs/` — compatibility matrix and design notes
 
-The Rust core performs structural comparison. The Python adapter
-converts supported live Python objects into the core value model and
-renders DeepDiff-compatible reports. JSON strings use a separate fast path
-that parses, diffs, and serializes in Rust.
-
-## Compatibility
-
-The reference target is `deepdiff==9.1.0`. Compatibility is a work in progress,
-not a blanket guarantee. The target is full parity; see [the compatibility matrix](docs/compatibility.md)
-for what is implemented today.
-
-## Performance
-
-Upstream publishes reproducible benchmarks against DeepDiff 9.1.0, including
-a one-million-key dictionary comparison. Those numbers are upstream results,
-not yet independently reproduced in this repository and not a promise for
-every workload. Our benchmarks will measure Python conversion, Rust diffing,
-report rendering, end-to-end latency, and peak RSS separately.
+Live Python objects are converted into a native value model, diffed in Rust,
+then rendered as DeepDiff-compatible reports. JSON strings can skip the
+Python object round-trip via `diff_json`.
 
 ## Development
 
 ```bash
+pip install -e ".[test]"   # pytest + deepdiff==9.1.0
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -73,12 +104,10 @@ pytest -q
 
 ## Third-party code
 
-The comparison engine and Python conversion modules are forked from
-Onix, Copyright (c) 2026 Rodrigo Carvajal, under the MIT License. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the upstream
-[LICENSE-ONIX](LICENSE-ONIX).
+Comparison engine and Python conversion modules are forked from Onix,
+Copyright (c) 2026 Rodrigo Carvajal, MIT. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [LICENSE-ONIX](LICENSE-ONIX).
 
 ## License
 
-The integration code in this repository is MIT-licensed. Third-party notices
-and their respective licenses remain applicable.
+MIT. Upstream licenses in third-party notices still apply.
