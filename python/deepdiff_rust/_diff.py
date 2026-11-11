@@ -7,7 +7,7 @@ import json
 import uuid
 
 from . import _native
-from ._callbacks import callbacks_active, compose_skip
+from ._callbacks import _deepdiff_bridge, callbacks_active, compose_skip
 from ._group_by import group_pair
 from ._options import native_options
 from ._paths import skip_filter
@@ -89,6 +89,41 @@ class DeepDiff(dict):
             iterable_compare_func=iterable_compare_func,
         )
         exclude_types = tuple(exclude_types) if exclude_types else None
+        if custom_operators or iterable_compare_func:
+            real = _deepdiff_bridge(
+                t1, t2,
+                ignore_order=ignore_order, verbose_level=verbose_level, view=view,
+                exclude_paths=exclude_paths, exclude_regex_paths=exclude_regex_paths,
+                include_paths=include_paths, exclude_types=exclude_types,
+                ignore_private_variables=ignore_private_variables,
+                significant_digits=significant_digits,
+                number_format_notation=number_format_notation, math_epsilon=math_epsilon,
+                use_log_scale=use_log_scale,
+                log_scale_similarity_threshold=log_scale_similarity_threshold,
+                ignore_nan_inequality=ignore_nan_inequality,
+                ignore_string_case=ignore_string_case,
+                ignore_numeric_type_changes=ignore_numeric_type_changes,
+                ignore_string_type_changes=ignore_string_type_changes,
+                ignore_type_in_groups=ignore_type_in_groups,
+                ignore_type_subclasses=ignore_type_subclasses,
+                truncate_datetime=truncate_datetime, use_enum_value=use_enum_value,
+                threshold_to_diff_deeper=threshold_to_diff_deeper,
+                cutoff_distance_for_pairs=cutoff_distance_for_pairs,
+                cutoff_intersection_for_pairs=cutoff_intersection_for_pairs,
+                zip_ordered_iterables=zip_ordered_iterables,
+                get_deep_distance=get_deep_distance, report_repetition=report_repetition,
+                max_diffs=max_diffs, max_passes=max_passes,
+                custom_operators=custom_operators,
+                exclude_obj_callback=exclude_obj_callback,
+                exclude_obj_callback_strict=exclude_obj_callback_strict,
+                include_obj_callback=include_obj_callback,
+                include_obj_callback_strict=include_obj_callback_strict,
+                iterable_compare_func=iterable_compare_func,
+            )
+            self._native = None
+            self._bridge = real
+            super().__init__(dict(real))
+            return
         skip = skip_filter(exclude_paths, include_paths, exclude_regex_paths, exclude_types)
         skip = compose_skip(
             skip, t1, t2,
@@ -97,6 +132,7 @@ class DeepDiff(dict):
             include_obj_callback=include_obj_callback,
             include_obj_callback_strict=include_obj_callback_strict,
         )
+        self._bridge = None
         self._native = _native.DeepDiff(
             t1, t2, ignore_order=ignore_order, max_depth=max_depth, exclude_types=exclude_types,
             ignore_private_variables=ignore_private_variables, skip=skip, use_enum_value=use_enum_value,
@@ -122,6 +158,8 @@ class DeepDiff(dict):
 
     def to_dict(self, verbose_level=None):
         """The differences as a plain dict, with `type_changes` types as type objects."""
+        if self._native is None:
+            return self._bridge.to_dict(verbose_level=self._level(verbose_level))
         report = self._native.to_dict(self._level(verbose_level))
         if "type_changes" in report:
             classes = {**_BUILTIN_TYPES, **self._native._types}
@@ -136,6 +174,8 @@ class DeepDiff(dict):
         """The differences as JSON; extra keyword arguments go to `json.dumps`."""
         if default_mapping is not None:
             raise NotImplementedError("default_mapping is not supported yet.")
+        if self._native is None:
+            return self._bridge.to_json(verbose_level=self._level(verbose_level), **kwargs)
         text = self._native.to_json(self._level(verbose_level))
         if self._native.deep_distance is not None:
             report = json.loads(text)
@@ -151,7 +191,8 @@ class DeepDiff(dict):
     @property
     def affected_root_keys(self):
         """The root keys, indices or attribute names the differences sit under."""
-        keys = {_root_key(path) for findings in self._native.to_dict(2).values() for path in findings}
+        report = self.to_dict(2) if self._native is None else self._native.to_dict(2)
+        keys = {_root_key(path) for findings in report.values() for path in findings}
         keys.discard(_NOT_PRESENT)
         return keys
 

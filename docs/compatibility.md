@@ -31,7 +31,14 @@ Implemented, checked against `deepdiff==9.1.0`:
 - `zip_ordered_iterables`, `threshold_to_diff_deeper`,
   `cutoff_distance_for_pairs`, `cutoff_intersection_for_pairs`,
   `get_deep_distance`, `group_by`, `group_by_sort_key`, `report_repetition`
-  (`repetition_change`), `max_passes`, `max_diffs`.
+  (`repetition_change`), `max_passes`, `max_diffs`,
+  `exclude_obj_callback`, `exclude_obj_callback_strict`,
+  `include_obj_callback`, `include_obj_callback_strict`,
+  `iterable_compare_func`, `custom_operators`.
+  Object include/exclude callbacks filter on the retain pass (same post-diff
+  style as path filters). `iterable_compare_func` and `custom_operators`
+  currently bridge to the installed `deepdiff` package for full walk semantics.
+  `hasher` is not supported yet (DeepHash / phase 6).
 - `bytes`, `decimal.Decimal`, `uuid.UUID` and `complex` values, keys and
   set members, under the numeric and string options above.
 
